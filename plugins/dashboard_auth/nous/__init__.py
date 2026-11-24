@@ -14,6 +14,7 @@ Webapp instead of the configured one (``hermes_cli.dashboard_auth.listener_clien
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any, Callable, Optional
 
 from hermes_cli.dashboard_auth import (
@@ -188,11 +189,25 @@ def _settings() -> dict:
             "token_leeway": parse_leeway(section.get("token_leeway"))}
 
 
+def _is_root_hermes_home() -> bool:
+    """Only the launch root owns global dashboard auth; multiplex profiles are guests."""
+    root = os.path.abspath(os.path.expanduser("~/.hermes"))
+    configured = os.path.abspath(os.path.expanduser(os.environ.get("HERMES_HOME", root)))
+    return configured == root
+
+
 def register(ctx) -> None:
     """Register ``NousDashboardAuthProvider`` when a client_id is configured."""
     global LAST_SKIP_REASON
-    listener_client.offer(_swap_provider)
     LAST_SKIP_REASON = ""
+    if not _is_root_hermes_home():
+        LAST_SKIP_REASON = (
+            f"dashboard-auth-nous is root-only; skipping duplicate registration for "
+            f"HERMES_HOME={os.environ.get('HERMES_HOME', '')}"
+        )
+        logger.debug("%s: %s", _TAG, LAST_SKIP_REASON)
+        return
+    listener_client.offer(_swap_provider)
     kwargs, LAST_SKIP_REASON = register_provider(ctx, logger, _TAG, NousDashboardAuthProvider, _settings)
     if kwargs is not None:
         logger.info(

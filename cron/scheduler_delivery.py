@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from typing import Any, List, Optional
 
 from gateway.inbound_reply_context import record_cron_delivery, recording_cron_delivery
+from agent.operator_message_lint import lint as _lint_operator_message
 
 
 # Log-record parity with the origin module.
@@ -1075,6 +1076,7 @@ class _TargetDelivery:
     opened_thread_id: Optional[str]
     live_adapter_ready: bool = False
     force_document: bool = False  # [[as_document]]: images go unrecompressed
+    attribute_insights: bool = False
     live_error: Optional[str] = None  # the live lane's own rejection string, e.g. "send_path_degraded"
     # The adapter's SendResult.retryable verdict for live_error (carried by DeliverySendError on the
     # exception arm, read off the SendResult on the unconfirmed arm). The string alone is ambiguous —
@@ -1502,6 +1504,13 @@ def _deliver_via_live_adapter(
                 route_thread_id if route_thread_id is not None else "-",
                 delivered_message_id if delivered_message_id is not None else "-")
             delivered = True
+            # Opt-in insight attribution is downstream of a confirmed send, never of the agent's
+            # pre-delivery sent-ids write. The hook requires a platform message id and is best-effort.
+            if t.attribute_insights:
+                from cron.insight_attribution import record_confirmed_delivery
+                record_confirmed_delivery(
+                    job, platform=t.platform_name, chat_id=str(t.chat_id), thread_id=t.thread_id,
+                    message_id=delivered_message_id, content=cleaned_text, transport="live_adapter")
             _seed_live_delivery_sessions(t, delivered_message_id)
     except Exception as e:
         err_msg = f"live adapter delivery to {t.where} failed: {e}"
@@ -1563,6 +1572,14 @@ def _deliver_standalone(
         delivery_errors.append(msg)
     logger.info("Job '%s': delivered to %s:%s", job["id"], t.platform_name, t.chat_id)
     record_cron_delivery(t.platform_name, t.chat_id, content.strip(), result)  # replies to ANY chunk framed
+    # Standalone success is the same post-delivery seam as live-adapter success. Telegram's
+    # standalone sender returns message_id; adapters without one deliberately leave intent pending.
+    if t.attribute_insights:
+        from cron.insight_attribution import record_confirmed_delivery
+        record_confirmed_delivery(
+            job, platform=t.platform_name, chat_id=str(t.chat_id), thread_id=t.thread_id,
+            message_id=result.get("message_id") if isinstance(result, dict) else None,
+            content=content, transport="standalone")
     # Thread seeding only happens on the live lane, so no thread_seeded gate applies here.
     _maybe_mirror_cron_delivery(
         job, t.platform_name, t.chat_id, t.mirror_text, thread_id=t.thread_id,
@@ -1573,7 +1590,7 @@ def _deliver_standalone(
 
 def _prepare_target_delivery(
     job: dict, target: dict, *, adapters, loop, config, notify_delivery: bool, mirror_enabled: bool,
-    mirror_text: str, delivery_errors: list,
+    mirror_text: str, delivery_errors: list, attribute_insights: bool = False,
 ) -> Optional[_TargetDelivery]:
     """Per-target prologue of ``_deliver_result``: origin/mirror/in_channel gates, transport
     resolution, continuable-thread open. None (error noted in ``delivery_errors``) if unservable."""
@@ -1678,7 +1695,8 @@ def _prepare_target_delivery(
         origin=origin, origin_target=origin_target, origin_user_id=origin_user_id,
         is_dm_target=is_dm_target, mirror_text=mirror_text, mirror_this_target=mirror_this_target,
         in_channel_surface=in_channel_surface, inchannel_continuable=inchannel_continuable,
-        opened_thread_id=opened_thread_id, live_adapter_ready=live_adapter_ready)
+        opened_thread_id=opened_thread_id, live_adapter_ready=live_adapter_ready,
+        attribute_insights=attribute_insights)
 
 
 def _unresolved_delivery_outcome(job: dict, for_failure: bool) -> Optional[str]:
@@ -1717,6 +1735,27 @@ def _should_wrap_cron_response(job: dict, user_cfg: Any) -> bool:
     return bool(cron_cfg.get("wrap_response", True))
 
 
+def _operator_message_quality_hold(
+    content: str, job: Optional[dict] = None, evidence: Optional[str] = None,
+) -> Optional[str]:
+    """Hold unsafe prose before transport; trusted source evidence stays explicit."""
+    schedule_evidence = ""
+    if job:
+        schedule_evidence = "\n".join(
+            str(job.get(key) or "")
+            for key in ("schedule", "schedule_display", "timezone")
+        )
+    # Job names and prompts are not evidence. Source-count, sender, and
+    # qualifier checks require a real evidence manifest from the authoring path.
+    findings = _lint_operator_message(
+        content, evidence=evidence or "", schedule_evidence=schedule_evidence,
+    )
+    if not findings:
+        return None
+    codes = sorted({finding["code"] for finding in findings})
+    return "operator-message-quality hold: " + ",".join(codes)
+
+
 def _deliver_result(
     job: dict, content: str, adapters=None, loop=None, *, for_failure: bool = False
 ) -> Optional[str]:
@@ -1731,6 +1770,19 @@ def _deliver_result(
         job["_delivery_reached_none"] = (outcome := _unresolved_delivery_outcome(job, for_failure)) is not None
         _record_delivery_verification(job, [])
         return outcome
+    if not for_failure:
+        # A no-agent job's content is the exact stdout of its deterministic
+        # script, so it can support percentages in that same output. Do not
+        # extend this to agent-written prose or production-verification claims.
+        script_evidence = content if job.get("no_agent") else None
+        quality_hold = _operator_message_quality_hold(
+            content, job=job, evidence=script_evidence,
+        )
+        if quality_hold:
+            logger.warning("Job '%s': %s", job.get("id", "?"), quality_hold)
+            _record_delivery_verification(job, [])
+            job["last_delivery_error"] = quality_hold
+            return quality_hold
 
     # Restart-safe workers have no live gateway adapters: hand the send back through a durable
     # queue so the current or replacement gateway performs it with relay/E2EE parity. The execution
@@ -1865,7 +1917,8 @@ def _deliver_result(
         t = _prepare_target_delivery(
             job, target, adapters=adapters, loop=loop, config=config,
             notify_delivery=notify_delivery,
-            mirror_enabled=mirror_enabled, mirror_text=mirror_text, delivery_errors=delivery_errors)
+            mirror_enabled=mirror_enabled, mirror_text=mirror_text, delivery_errors=delivery_errors,
+            attribute_insights=not for_failure)
         if t is None:
             continue
         t.force_document = "[[as_document]]" in content  # the job output, never the wrapped job name

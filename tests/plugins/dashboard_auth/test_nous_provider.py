@@ -38,6 +38,13 @@ from hermes_cli.dashboard_auth import (
     assert_protocol_compliance,
 )
 
+
+@pytest.fixture(autouse=True)
+def _root_home_for_provider_tests(monkeypatch):
+    """Registration tests exercise the root launch process, not a multiplex guest."""
+    monkeypatch.setenv("HERMES_HOME", "/Users/jkw/.hermes")
+
+
 # ---------------------------------------------------------------------------
 # RSA keypair fixture (module-scope — keygen is slow)
 # ---------------------------------------------------------------------------

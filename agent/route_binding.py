@@ -11,6 +11,7 @@ import logging
 from typing import Any, Dict, NamedTuple, Optional, Tuple
 
 from utils import base_url_host_matches
+from hermes_cli.runtime_provider_guard import validate_provider_tuple
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +41,9 @@ def resolve_route_entry_client(entry: dict[str, Any], provider: str, model: str,
     # Pass the entry's base_url/api_key so custom endpoints (Ollama Cloud) resolve instead
     # of falling through to OpenRouter defaults.
     base_url_hint = (entry.get("base_url") or "").strip() or None
+    # A custom first-party endpoint cannot serve another vendor's OpenRouter-style slug.
+    # Reject the tuple before client construction so no HTTP request is dispatched.
+    validate_provider_tuple(provider, base_url_hint, model)
     api_key_hint = resolve_entry_api_key(entry)
     api_mode_explicit, api_mode = _fallback_api_mode_hint(entry, provider, base_url_hint)
     # Ollama Cloud: OLLAMA_API_KEY from env when the entry has no key. Host match, not

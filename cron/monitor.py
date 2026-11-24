@@ -156,19 +156,35 @@ def check_monitor(job: dict) -> MonitorOutcome:
     """Run the monitor source and decide whether the agent should run.
 
     On change (or first run) the new hash + snapshot are persisted BEFORE the agent runs — detection
-    time is the state boundary, so a failed agent run doesn't re-alert on the same content forever.
-    On failure nothing is persisted.
+    time is the state boundary. A failed agent run gets up to three attempts for the same output;
+    success latches it, while the final failure suppresses it until the content changes.
+    Source failures set only a diagnostic marker and never consume an agent attempt.
     """
     job_id = str(job.get("id") or "")
+    raw_state = job.get("monitor_state")
     ok, output = _run_monitor_source(job)
     if not ok:
+        state = dict(raw_state) if isinstance(raw_state, dict) else {}
+        state["source_failure_active"] = True
+        try:
+            from cron.jobs import update_job
+
+            update_job(job_id, {"monitor_state": state})
+        except Exception as exc:
+            logger.warning("Monitor: failed to record source failure for %r: %s", job_id, exc)
         return MonitorOutcome(ok=False, error=output)
 
     new_hash = hash_monitor_output(output)
-    raw_state = job.get("monitor_state")
-    last_hash = raw_state.get("last_output_hash") if isinstance(raw_state, dict) else None
-
-    if last_hash is not None and new_hash == last_hash:
+    retry_state = raw_state if isinstance(raw_state, dict) else {}
+    last_hash = retry_state.get("last_output_hash")
+    retry_count = int(retry_state.get("retry_count") or 0)
+    same_output = last_hash is not None and new_hash == last_hash
+    retry_same_output = bool(
+        same_output
+        and retry_state.get("agent_attempt_required")
+        and 0 < retry_count < 3
+    )
+    if same_output and not retry_same_output:
         return MonitorOutcome(ok=True, changed=False)
 
     first_run = last_hash is None
@@ -179,7 +195,13 @@ def check_monitor(job: dict) -> MonitorOutcome:
         shown_output = shown_output[:MAX_OUTPUT_CHARS] + "\n... [output truncated]"
 
     current = f"### Current output\n\n```\n{shown_output}\n```"
-    if first_run:
+    if retry_same_output:
+        context_block = (
+            f"## MONITOR RETRY (attempt {retry_count + 1} of 3)\n\n"
+            "The previous agent attempt failed for this unchanged output. "
+            "Complete the same work; do not treat this as new content.\n\n" + current
+        )
+    elif first_run:
         context_block = (
             "## Monitor Baseline (first run)\n\n"
             "This is the first observation of the monitored source — there is "
@@ -193,11 +215,13 @@ def check_monitor(job: dict) -> MonitorOutcome:
             f"### Diff (previous → current)\n\n```diff\n{diff}\n```\n\n" + current
         )
 
-    _persist_monitor_state(job_id, new_hash, output)
+    _persist_monitor_state(
+        job_id, new_hash, output, retry_count=retry_count if retry_same_output else 0
+    )
     return MonitorOutcome(ok=True, changed=True, first_run=first_run, context_block=context_block)
 
 
-def _persist_monitor_state(job_id: str, new_hash: str, output: str) -> None:
+def _persist_monitor_state(job_id: str, new_hash: str, output: str, *, retry_count: int) -> None:
     from cron.jobs import _hermes_now, update_job
 
     _write_last_output(job_id, output)
@@ -208,8 +232,34 @@ def _persist_monitor_state(job_id: str, new_hash: str, output: str) -> None:
                 "monitor_state": {
                     "last_output_hash": new_hash,
                     "last_changed_at": _hermes_now().isoformat(),
+                    "agent_attempt_required": True,
+                    "retry_count": retry_count,
                 }
             },
         )
     except Exception as exc:
         logger.warning("Monitor: failed to persist state for %r: %s", job_id, exc)
+
+
+def record_monitor_agent_result(job: dict, success: bool) -> None:
+    """Resolve one changed-output agent attempt inside the jobs write lock.
+
+    The first two failures leave a pending retry for the next tick. The third
+    latches the hash, preventing an unchanging failure from retrying forever.
+    A source failure is not an agent attempt and leaves the budget unchanged.
+    """
+    state = job.get("monitor_state")
+    if not isinstance(state, dict):
+        return
+    if state.pop("source_failure_active", False):
+        return
+    if not state.get("agent_attempt_required"):
+        return
+    if success:
+        state["agent_attempt_required"] = False
+        state["retry_count"] = 0
+        return
+    attempts = int(state.get("retry_count") or 0) + 1
+    state["retry_count"] = attempts
+    if attempts >= 3:
+        state["agent_attempt_required"] = False

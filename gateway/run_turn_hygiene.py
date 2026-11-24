@@ -411,9 +411,8 @@ class GatewayTurnHygieneMixin:
             "proceeding without compression this turn%s",
             session_entry.session_id, time.monotonic() - attempt.wait_started, _log_suffix,
         )
-        await self._hmwa_hygiene_notify(
-            source, attempt.meta, t("gateway.compress.turnhold_deferred"), "compression-turnhold notice",
-        )
+        # Turn-hold is routine scheduling state, not an operator-facing event.
+        # Keep it in the gateway log; actionable compression failures still notify.
         raise
 
     async def _hmwa_hygiene_on_timeout(self, attempt, hs, session_entry, session_key, source):

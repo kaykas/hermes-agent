@@ -25,6 +25,8 @@ from gateway.platforms.base_media_flags import pad_inline_flags
 from gateway.platforms.base_kanban_media import _kanban_attachment_roots, _kanban_board_db_paths
 from gateway.runtime_footer import footer_onto_photo_caption, send_footer_unless_captioned
 from gateway.platforms.session_model import _SessionModelSettingsMixin
+from gateway.config_path_guard import is_protected_config_attachment, redact_config_paths
+
 from utils import normalize_proxy_url, unlink_files_older_than
 from agent.file_safety import is_project_env_basename
 from agent.i18n import t
@@ -3065,7 +3067,11 @@ class BasePlatformAdapter(_SessionModelSettingsMixin, ABC):
     async def send_document(self, chat_id: str, file_path: str, caption: Optional[str] = None,
                             file_name: Optional[str] = None, reply_to: Optional[str] = None,
                             metadata: Optional[dict[str, Any]] = None, **kwargs) -> SendResult:
-        """Send a document/file natively. Default: friendly failure notice."""
+        """Send a document/file natively. Protected local configuration is never attached."""
+        if is_protected_config_attachment(file_path):
+            logger.warning("[%s] Refusing protected configuration attachment: %s", self.name, file_path)
+            return SendResult(success=False, error="protected configuration attachment refused",
+                              raw_response={"failure_notice_sent": True})
         return await self._send_media_fallback_notice(
             "send_document", "file", file_path, chat_id, caption, reply_to, metadata, file_name=file_name)
 
@@ -3112,12 +3118,14 @@ class BasePlatformAdapter(_SessionModelSettingsMixin, ABC):
         """Drop unsafe MEDIA paths and normalize accepted paths; ``dropped`` collects the rejects."""
         return [
             (safe_path, bool(is_voice)) for media_path, is_voice in media_files or []
+            if not is_protected_config_attachment(media_path)
             if (safe_path := _validated_delivery_path(media_path, session_key, "MEDIA directive path", dropped))]
 
     @staticmethod
     def filter_local_delivery_paths(file_paths, session_key: str = "") -> list[str]:
         """Drop unsafe bare local file paths and normalize accepted paths."""
-        safe_paths = (_validated_delivery_path(p, session_key, "local file path") for p in file_paths or [])
+        safe_paths = (_validated_delivery_path(p, session_key, "local file path")
+                      for p in file_paths or [] if not is_protected_config_attachment(p))
         return [p for p in safe_paths if p]
 
     @staticmethod
@@ -4256,6 +4264,9 @@ class BasePlatformAdapter(_SessionModelSettingsMixin, ABC):
         image URLs → residual directives → bare local paths (skipped for ephemeral notices so config
         paths stay text; unknown-extension MEDIA tags survive for the bare-path detector). History
         dedup is bare-path only, off-loop, fail-open. An emptied non-empty response is recovered."""
+        # Normalize protected config references before any MEDIA or bare-path extraction. The
+        # attachment filters and direct send_document guard below independently deny ~/ forms.
+        response = redact_config_paths(response)
         # Captured before extract_media strips it: images then go via send_document (no recompression).
         force_document = "[[as_document]]" in response
         pre_extract = response
@@ -4592,7 +4603,8 @@ class BasePlatformAdapter(_SessionModelSettingsMixin, ABC):
         scope_id: Optional[str] = None, guild_id: Optional[str] = None,
         parent_chat_id: Optional[str] = None, message_id: Optional[str] = None,
         role_authorized: bool = False, auto_thread_created: bool = False,
-        auto_thread_initial_name: Optional[str] = None) -> SessionSource:
+        auto_thread_initial_name: Optional[str] = None,
+        multi_bot_mentioned: bool = False) -> SessionSource:
         """Build a SessionSource (``gateway.profile_routes`` stamps the matching ``source.profile``)."""
         from gateway.bot_loop_guard import configured_bot_user
         def _opt(value) -> Optional[str]:
@@ -4604,7 +4616,7 @@ class BasePlatformAdapter(_SessionModelSettingsMixin, ABC):
             chat_topic=(chat_topic or "").strip() or None, user_id_alt=user_id_alt,
             chat_id_alt=chat_id_alt, is_bot=is_bot or configured_bot_user(getattr(self, "config", None), user_id),
             scope_id=_opt(scope_id), guild_id=_opt(guild_id), parent_chat_id=_opt(parent_chat_id),
-            message_id=_opt(message_id))
+            message_id=_opt(message_id), multi_bot_mentioned=multi_bot_mentioned)
         # Profile from configured routes, else the owning profile of a dedicated secondary bot (so no
         # later ``source.profile``-less fallback can re-route the message through the default bot's routes).
         owner_profile = getattr(self, "_owner_profile", None)

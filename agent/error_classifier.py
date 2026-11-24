@@ -768,7 +768,7 @@ _ERROR_CODE_VERDICTS: dict[str, Verdict] = {
     **dict.fromkeys(("resource_exhausted", "throttled", "rate_limit_exceeded"),
                     _v(_R.rate_limit, should_rotate_credential=True)),
     **dict.fromkeys(_BILLING_ERROR_CODES, _V_BILLING),
-    **dict.fromkeys(("model_not_found", "model_not_available", "invalid_model"), _V_MODEL_NOT_FOUND),
+    **dict.fromkeys(("model_not_found", "model_not_available", "invalid_model", "resource_not_found_error"), _V_MODEL_NOT_FOUND),
     **dict.fromkeys(("context_length_exceeded", "max_tokens_exceeded"), _V_CONTEXT_OVERFLOW),
     **dict.fromkeys(_MEMORY_CEILING_ERROR_CODES, _V_OVERLOADED),
     "invalid_encrypted_content": _V_INVALID_ENCRYPTED,
@@ -1251,6 +1251,10 @@ def _status_404(c: _Ctx) -> Verdict:
     # so _by_error_code never sees it; a bare "Not Found" message has nothing to match.
     if c.code in _BILLING_ERROR_CODES:
         return _V_BILLING
+    # Vendor 404 bodies carry a deterministic machine code but no matching prose.
+    # This handler runs before _by_error_code, so classify it here on attempt 1.
+    if c.code == "resource_not_found_error":
+        return _V_MODEL_NOT_FOUND
     verdict = _first_match(c.msg, _404_RULES)
     if verdict is not None:
         return verdict
