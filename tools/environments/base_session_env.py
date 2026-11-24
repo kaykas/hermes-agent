@@ -115,16 +115,19 @@ def _pipe_marker_printf(marker: str) -> str:
     return f"printf '\\n{marker}%s{marker}\\n' \"${{__hermes_ps[*]-}}\""
 
 
-def _eval_capturing_pipestatus(escaped: str) -> str:
-    """``eval`` the command and keep its last pipeline's ``PIPESTATUS`` as side data.
+def _command_capturing_pipestatus(command: str) -> str:
+    """Run *command* in the current shell and keep its last pipeline's ``PIPESTATUS`` as side data.
 
-    The array must be read inside the same ``eval`` (afterwards it holds only ``eval``'s
-    status), while ``$?`` stays the exit code: the two differ for ``!``, ``if``/``while``,
-    ``pipefail`` and parse errors. The blank line stops the capture joining a command
-    continued by a trailing backslash. The restore sits on the left of ``&&`` so its
-    non-zero status fires neither a user's ``ERR`` trap a second time nor ``set -e``.
+    The array must be read before another command replaces it, while ``$?`` stays the exit code:
+    the two differ for ``!``, ``if``/``while``, ``pipefail`` and parse errors. Run the source
+    directly instead of through another ``eval`` parse: Bash reports a syntax error in the user's
+    source as 2, but reports the same error from ``eval`` as 1. The brace group lets the caller
+    close its secret descriptors for the user command and capture alike. The restore sits on the
+    left of ``&&`` so its non-zero status fires neither a user's ``ERR`` trap a second time nor
+    ``set -e``.
     """
-    return f"eval '{escaped}\n\n__hermes_rc=$? __hermes_ps=(\"${{PIPESTATUS[@]}}\"); (exit $__hermes_rc) && :'"
+    return (f"{{ {command}\n\n__hermes_rc=$? __hermes_ps=(\"${{PIPESTATUS[@]}}\"); "
+            "(exit $__hermes_rc) && :; }")
 
 
 def _can_capture_pipestatus(command: str) -> bool:
@@ -311,6 +314,10 @@ def _wrap_command_script(
     ancestor's) and the script reads that open file, never a newer one published meanwhile.
     """
     escaped = command.replace("'", "'\\''")
+    if command.endswith("\\"):
+        # ``eval`` would otherwise consume a final backslash as its own line continuation.
+        # Double it so the command sees the same literal trailing backslash on Bash 3.2 and newer.
+        escaped += "\\"
     capture = bool(pipe_marker) and _can_capture_pipestatus(command)
     save, restore = _passthrough_save_restore(passthrough_names)
     parts = list(save)
@@ -324,7 +331,7 @@ def _wrap_command_script(
     elif snapshot_ready:
         parts.append(f"source {quoted_snap} >/dev/null 2>&1 || true")
     parts += restore
-    run = _eval_capturing_pipestatus(escaped) if capture else f"eval '{escaped}'"
+    run = _command_capturing_pipestatus(command) if capture else f"eval '{escaped}'"
     parts += [
         'export AI_AGENT="${AI_AGENT:-hermes-agent}" HERMES_AGENT="${HERMES_AGENT:-true}"',
         'export GIT_PAGER="${GIT_PAGER:-cat}" PAGER="${PAGER:-cat}"',

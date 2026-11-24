@@ -740,7 +740,7 @@ DANGEROUS_PATTERNS = [
     # Anchor whole-input lookaheads: re.search otherwise rescans every suffix of
     # long non-matching commands, holding the GIL and starving Gateway threads.
     (r'\A(?=[\s\S]*\blaunchctl\s+(?:stop|kickstart|bootout|unload|kill|disable|remove)\b)(?=[\s\S]*\b(?:hermes|ai\.hermes)\b)', "stop/restart hermes launchd service (kills running agents)"),
-    (rf'\b(cp|mv|install)\b.*\s{_SYSTEM_CONFIG_PATH}', "copy/move file into system config path"),
+    (rf'\b(cp|mv|install)\b.*\s["\']?{_SYSTEM_CONFIG_PATH}[^\s"\']*["\']?{_COMMAND_TAIL}', "copy/move file into system config path"),
     (rf'\b(cp|mv|install)\b.*\s["\']?{_PROJECT_SENSITIVE_WRITE_TARGET}["\']?{_COMMAND_TAIL}', "overwrite project env/config file"),
     # cp/mv/install OVERWRITING a credential/SSH/shell-rc/Hermes file (key implant, login-time
     # injection) — pairs the tee/redirection coverage. Anchored to the command tail so only the
