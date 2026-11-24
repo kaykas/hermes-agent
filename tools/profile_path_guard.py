@@ -52,7 +52,13 @@ def check_path(path: str, *, profiles_root: Optional[Path] = None,
     if not isinstance(path, str) or not path:
         return None
     root = os.path.normpath(str(openclaw_root or openclaw_agents_root()))
-    candidate = os.path.normpath(os.path.expanduser(os.path.expandvars(path)))
+    expanded = os.path.expandvars(path)
+    # Expanding ``~user`` consults this host's passwd database. Leave that form
+    # lexical here: hosted path resolution rejects it, while local resolution
+    # retains its normal expanduser behavior after this preflight finishes.
+    if expanded == "~" or expanded.startswith("~/"):
+        expanded = os.path.expanduser(expanded)
+    candidate = os.path.normpath(expanded)
     if candidate != root and not candidate.startswith(root + os.sep):
         # Relative or differently-anchored spellings still carry the segment.
         return check_command(path, profiles_root=profiles_root)
