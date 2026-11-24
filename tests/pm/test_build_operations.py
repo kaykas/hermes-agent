@@ -328,7 +328,7 @@ def test_requirements_build_installs_offline_markers_and_seals_only_build_pth(tm
          "print(json.dumps([app_dep.__version__, leaf_dep.__version__, sys.base_prefix, "
          "importlib.util.find_spec('missing_dep') is None]))"], cwd=tmp_path, env=build_tools,
     ))
-    assert result == ["1.0", "1.0", sys.base_prefix, True]
+    assert result == ["1.0", "1.0", str(Path(sys.base_prefix).resolve()), True]
     assert executable.parent.parent == out
     assert bool(list(out.rglob("__editable__.app_dep-1.0.pth"))) is not sealed
     assert list(out.rglob("app_dep.pth")), "load-bearing .pth must survive sealing"
