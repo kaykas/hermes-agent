@@ -19,6 +19,14 @@ from pm.paths import repo_root
 from tests.fakes.main_era_venv import main_era_venv
 
 
+@pytest.fixture(autouse=True)
+def _matrix_supported_on_every_test_host(monkeypatch):
+    """These fake-venv state tests exercise Matrix even on hosts its real wheels exclude."""
+    supported = extras.extra_supported
+    monkeypatch.setattr(extras, "extra_supported",
+                        lambda extra, **kwargs: True if extra == "matrix" else supported(extra, **kwargs))
+
+
 @pytest.fixture()
 def synced(monkeypatch):
     calls = []
