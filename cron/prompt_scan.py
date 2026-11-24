@@ -149,8 +149,8 @@ def _scan_cron_lifecycle_prompt(prompt: str) -> str:
         return ""
     return (
         "Blocked: an in-gateway cron cannot restart, stop, or uninstall the "
-        "gateway it runs inside. Use an external controller with a durable "
-        "receipt; cron may only read and report that receipt."
+        "gateway it runs inside (#30719). Use an external controller with a "
+        "durable receipt; cron may only read and report that receipt."
     )
 
 
