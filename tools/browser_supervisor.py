@@ -142,12 +142,13 @@ def _local_process_identity(pid: int) -> tuple[bool, Optional[float]]:
     if os.name == "nt":
         return True, None
     import subprocess
+    from tools.environments.local import build_subprocess_env
     try:
         result = subprocess.run(
             ["ps", "-p", str(pid), "-o", "stat=", "-o", "lstart="],
             capture_output=True, text=True, encoding="utf-8", errors="replace",
             stdin=subprocess.DEVNULL, timeout=3, check=False,
-            env={**os.environ, "LC_ALL": "C"},
+            env=build_subprocess_env(scrub_secrets=False, inherit_profile_home=False, extra={"LC_ALL": "C"}),
         )
     except Exception:
         return True, None
