@@ -320,6 +320,12 @@ def _finalize_child_env(env: dict) -> dict:
     _apply_profile_home(env)
     _inject_session_context_env(env)
     _strip_hermes_owned_pythonpath_and_runtime_markers(env)
+    path_key = _path_env_key(env)
+    if path_key is not None:
+        env[path_key] = _prepend_current_python_bin_dir(env.get(path_key, ""))
+        # Keep the selected Hermes shim ahead of the interpreter's own shim;
+        # ``python3`` still resolves through the remaining PATH entries.
+        env[path_key] = _prepend_hermes_bin_dir(env[path_key])
     strip_supervised_process_identity(env)
     _apply_windows_msys_bash_env_defaults(env)
     from agent.delegation_context import delegated_child_subprocess_env
@@ -757,15 +763,26 @@ def _resolve_hermes_bin_dir() -> str | None:
     return _HERMES_BIN_DIR
 
 
+def _prepend_current_python_bin_dir(existing_path: str) -> str:
+    """Put the running Hermes interpreter first so child ``python3`` has its packages."""
+    bin_dir = os.path.dirname(sys.executable) if sys.executable else ""
+    shim = "python3.exe" if _IS_WINDOWS else "python3"
+    if not bin_dir or not os.path.isfile(os.path.join(bin_dir, shim)):
+        return existing_path
+    rest = [entry for entry in existing_path.split(os.pathsep) if entry and entry != bin_dir]
+    return os.pathsep.join([bin_dir, *rest])
+
+
 def _prepend_hermes_bin_dir(existing_path: str) -> str:
-    """Prepend the hermes install dir to ``existing_path`` if missing. A sealed payload's
-    launcher dir moves to the front even when already listed: a login PATH can list
-    another install's ``hermes`` ahead of it."""
+    """Move the selected Hermes console-script dir to the front without duplicating it.
+
+    A login PATH can list another install's ``hermes`` ahead of the selected one.
+    """
     bin_dir = _resolve_hermes_bin_dir()
-    if bin_dir and _HERMES_BIN_DIR_IS_PAYLOAD:
-        rest = [entry for entry in existing_path.split(os.pathsep) if entry and entry != bin_dir]
-        return os.pathsep.join([bin_dir, *rest])
-    return _prepend_missing_path_entries(existing_path, [bin_dir] if bin_dir else [])
+    if not bin_dir:
+        return existing_path
+    rest = [entry for entry in existing_path.split(os.pathsep) if entry and entry != bin_dir]
+    return os.pathsep.join([bin_dir, *rest])
 
 
 def _managed_runtime_path_entries() -> list[str]:
@@ -1068,7 +1085,13 @@ def _kill_process_group_posix(proc) -> None:
     try:
         pgid = os.getpgid(proc.pid)
     except ProcessLookupError:
-        if (pgid := getattr(proc, "_hermes_pgid", None)) is None:
+        pgid = getattr(proc, "_hermes_pgid", None)
+        if pgid is None:
+            # Direct-Popen callers can reach cleanup after a short-lived child has
+            # already exited. Without a cached PGID there is nothing safe to signal;
+            # a dead child is normal teardown, not a tool failure (rg ESRCH race).
+            if proc.poll() is not None:
+                return
             raise
     if not _leader_is_ours(pgid, expected_start):
         # Leader exited and its PID/PGID may have been recycled onto an unrelated

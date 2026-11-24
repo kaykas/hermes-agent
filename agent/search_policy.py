@@ -28,7 +28,7 @@ SEARCH_PRUNE_DIR_NAMES = frozenset({
     # Python and package-manager caches.
     "__pycache__", ".cache", ".Trash", ".tox", ".nox", ".mypy_cache",
     ".pytest_cache", ".ruff_cache", ".npm", ".yarn", ".pnpm-store",
-    ".gradle", ".m2", ".nuget",
+    ".gradle", ".m2", ".nuget", "Caches", "agentx",
     # Backup copies.
     "backups", "backup", ".backups",
 })

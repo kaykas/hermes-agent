@@ -100,6 +100,10 @@ async def test_native_codec_closed_metadata_contract_and_reply_expected(tmp_path
         assert 'reply_expected' not in snapshot_native(runner, event)['native_text_v1']['event']
         for value in (False, True):
             assert restore_native(snapshot_native(runner, replace(event, reply_expected=value))).reply_expected is value
+        # Adapter-verified multi-bot addressing must survive the same native codec; dropping it
+        # here resets the restored source to False and re-enables the visible silence warning.
+        flagged = replace(event, source=replace(event.source, multi_bot_mentioned=True))
+        assert restore_native(snapshot_native(runner, flagged)).source.multi_bot_mentioned is True
         refused = [{'whatsapp_native_type': 'x', 'internal': True}, {'gateway_session_id': 's'},
                    {'_authorization_profile_home': '/x'}, {'arbitrary': 1}, {'whatsapp_native_type': 'x' * 65},
                    {'whatsapp_native': {'gateway_session_id': 's'}}, {'whatsapp_from_owner': 'yes'},

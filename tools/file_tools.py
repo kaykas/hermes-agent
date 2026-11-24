@@ -35,6 +35,7 @@ from tools.file_tools_write_guards import (
     _READ_DEDUP_STATUS_MESSAGE, _check_approval_required_write, _check_binary_document_write,
     _check_cross_profile_path, _check_protected_instruction_write, _check_sensitive_path,
     _is_internal_file_tool_content, _stale_overwrite_blocker, _stale_write_refusal)
+from tools import file_tools_search_guard as _search_guard
 from tools.file_tools_read_tracking import (
     _bump_consecutive, _cap_read_tracker_data, _carry_full_write_baselines, _check_file_staleness,
     _check_not_found_cache, _dedup_lookup, _known_full_content_sha256,
@@ -1083,18 +1084,23 @@ def search_tool(pattern: str, target: str = "content", path: str = ".",
                 file_glob: str | None = None, limit: int = 50, offset: int = 0,
                 output_mode: str = "content", context: int = 0,
                 order: str = "discovery",
-                task_id: str = "default") -> str:
-    """Search for content or files."""
+                task_id: str = "default", fixed_strings: bool | None = None) -> str:
+    """Search for content or files. ``fixed_strings`` None: content patterns that
+    read as punctuation-heavy literals are searched literally (see
+    ``file_tools_search_guard``)."""
     try:
         offset, limit = normalize_search_pagination(offset, limit)
+        literal, auto_literal = _search_guard.resolve_fixed_strings(pattern, target, fixed_strings)
 
         # Pagination args (and order) are part of the key so paging through truncated
         # results doesn't trip the repeated-search guard.
-        search_key = ("search", pattern, target, str(path), file_glob or "", limit, offset, order)
+        search_key = ("search", pattern, target, str(path), file_glob or "", limit, offset, order, literal)
         with _read_tracker_lock:
             task_data = _read_tracker.setdefault(task_id, {
                 "last_key": None, "consecutive": 0, "read_history": set()})
+            _search_guard.start_search_streak(task_data)
             count = _bump_consecutive(task_data, search_key)
+            retries = _search_guard.retry_count(task_data, pattern, target)
 
         if count >= 4:
             return tool_error(
@@ -1103,6 +1109,11 @@ def search_tool(pattern: str, target: str = "content", path: str = ".",
                 "STOP re-searching and proceed with your task.",
                 pattern=pattern,
                 already_searched=count,
+                **{GUARDRAIL_REFUSAL_KEY: True})
+        if retries >= _search_guard.SEARCH_RETRY_CAP:
+            return tool_error(
+                _search_guard.retry_cap_message(pattern, target, retries),
+                pattern=pattern, unproductive_attempts=retries,
                 **{GUARDRAIL_REFUSAL_KEY: True})
 
         # Raw string before _resolve_path_for_task: resolving is the NTLM-leak
@@ -1127,11 +1138,17 @@ def search_tool(pattern: str, target: str = "content", path: str = ".",
         # "Similar paths"); cache the miss so a retry skips both.
         cached_search_nf = _check_not_found_cache("search", resolved_search_path, task_id)
         if cached_search_nf is not None:
+            with _read_tracker_lock:
+                _search_guard.record_search_outcome(task_data, pattern, target, False)
             return cached_search_nf
 
         result = _get_file_ops(task_id).search(
-            pattern=pattern, path=path, target=target, file_glob=file_glob,
+            pattern=_search_guard.escape_literal_pattern(pattern) if literal else pattern, path=path, target=target, file_glob=file_glob,
             limit=limit, offset=offset, output_mode=output_mode, context=context, order=order)
+        with _read_tracker_lock:
+            _search_guard.record_search_outcome(
+                task_data, pattern, target,
+                _search_guard.is_productive(result))
         omitted = _filter_read_blocked_search_results(result, task_id)
         for m in getattr(result, "matches", None) or ():
             if getattr(m, "content", None):
@@ -1149,6 +1166,13 @@ def search_tool(pattern: str, target: str = "content", path: str = ".",
         _search_err = result_dict.get("error") or ""
         if isinstance(_search_err, str) and _search_err.startswith("Path not found:"):
             _record_not_found("search", resolved_search_path, task_id, json.dumps(result_dict, ensure_ascii=False))
+
+        if literal:
+            result_dict["fixed_strings"] = True
+            if auto_literal:
+                result_dict["_fixed_strings"] = (
+                    "Searched as a literal string: the pattern is punctuation-heavy "
+                    "with no regex construct. Pass fixed_strings=false for regex.")
 
         if count >= 3:
             result_dict["_warning"] = (
@@ -1328,23 +1352,32 @@ SEARCH_FILES_SCHEMA = {
     "parameters": {
         "type": "object",
         "properties": {
-            "pattern": {"type": "string", "description": "Regex for content search; glob (e.g. '*.py', '*config*') for file search."},
-            "target": {"type": "string", "enum": ["content", "files"], "description": "'content' searches inside files, 'files' finds files by name.", "default": "content"},
-            "path": {"type": "string", "description": "Directory or file to search in.", "default": "."},
-            "file_glob": {"type": "string", "description": "Content search only: filter files by pattern (e.g. '*.py')."},
-            "limit": {"type": "integer", "description": "Maximum number of results.", "default": 50},
-            "offset": {"type": "integer", "description": "Skip first N results for pagination.", "default": 0},
-            "order": {"type": "string", "enum": ["discovery", "modified"], "description": "File search only: 'discovery' is fast bounded traversal order; 'modified' is exact global newest-first and may scan the full tree.", "default": "discovery"},
-            "output_mode": {"type": "string", "enum": ["content", "files_only", "count"], "description": "Content search only: 'content' shows matching lines with line numbers, 'files_only' lists file paths, 'count' shows match counts per file.", "default": "content"},
-            "context": {"type": "integer", "description": "Content search only: lines of context before and after each match.", "default": 0}
+            "pattern": {"type": "string", "description": "Regex pattern for content search, or glob pattern (e.g., '*.py') for file search. File globs take no regex syntax (|, \\d, ^, $); use '*.{yml,yaml}' for alternatives"},
+            "target": {"type": "string", "enum": ["content", "files"], "description": "'content' searches inside file contents, 'files' searches for files by name", "default": "content"},
+            "path": {"type": "string", "description": "Directory or file to search in (default: current working directory)", "default": "."},
+            "file_glob": {"type": "string", "description": "Filter files by pattern in grep mode (e.g., '*.py' to only search Python files)"},
+            "limit": {"type": "integer", "description": "Maximum number of results to return (default: 50)", "default": 50},
+            "offset": {"type": "integer", "description": "Skip first N results for pagination (default: 0)", "default": 0},
+            "order": {"type": "string", "enum": ["discovery", "modified"], "description": "File-search order: 'discovery' is fast bounded traversal order; 'modified' is exact global newest-first and may scan the full tree; ignored for content", "default": "discovery"},
+            "output_mode": {"type": "string", "enum": ["content", "files_only", "count"], "description": "Output format for grep mode: 'content' shows matching lines with line numbers, 'files_only' lists file paths, 'count' shows match counts per file", "default": "content"},
+            "context": {"type": "integer", "description": "Number of context lines before and after each match (grep mode only)", "default": 0},
+            "fixed_strings": {"type": "boolean", "description": "Content search: match pattern literally, not as a regex. Omitted: on automatically for punctuation-heavy patterns with no regex syntax"}
         },
         "required": ["pattern"]
     }
 }
 
 
+def _profile_path_error(*paths) -> str | None:
+    """Refusal for a multiplex profile's nonexistent ``~/.openclaw/agents/<name>`` tree."""
+    from tools.profile_path_guard import check_path
+    return next((err for p in paths if isinstance(p, str) and (err := check_path(p))), None)
+
+
 def _handle_read_file(args, **kw):
     tid = kw.get("task_id") or "default"
+    if err := _profile_path_error(args.get("path")):
+        return tool_error(err)
     return read_file_tool(path=args.get("path", ""), offset=args.get("offset", 1), limit=args.get("limit", DEFAULT_READ_LIMIT), task_id=tid)
 
 
@@ -1363,6 +1396,8 @@ def _handle_write_file(args, **kw):
             "payload, or use execute_code with hermes_tools.write_file() for very "
             "large files."
         )
+    if err := _profile_path_error(args["path"]):
+        return tool_error(err)
     if not isinstance(args["content"], str):
         return tool_error(
             f"write_file: 'content' must be a string, got "
@@ -1390,6 +1425,9 @@ def _handle_patch(args, **kw):
 
     tid = kw.get("task_id") or "default"
     mode = args.get("mode", "replace")
+    from tools.profile_path_guard import check_command
+    if err := _profile_path_error(args.get("path")) or check_command(args.get("patch") or ""):
+        return tool_error(err)
     return record_file_edit("patch", mode, lambda: _owned(kw.get("session_id") or tid, patch_tool,
         mode=mode, path=args.get("path"),
         old_string=args.get("old_string"), new_string=args.get("new_string"),
@@ -1415,11 +1453,14 @@ def _handle_search_files(args, **kw):
         # Whitespace is a real search (a tab, trailing spaces), so only emptiness is refused.
         return tool_error("search_files is missing required argument(s): pattern. The tool was NOT invoked. "
                           "A content search needs text or a regex to look for; to list files use target='files'.")
+    if err := _profile_path_error(path):
+        return tool_error(err)
     return search_tool(
         pattern=pattern, target=target, path=path,
         file_glob=args.get("file_glob"), limit=args.get("limit", 50), offset=args.get("offset", 0),
         output_mode=args.get("output_mode", "content"), context=args.get("context", 0),
-        order=args.get("order", "discovery"), task_id=tid)
+        order=args.get("order", "discovery"), task_id=tid,
+        fixed_strings=args.get("fixed_strings"))
 
 
 def _read_file_schema_overrides():

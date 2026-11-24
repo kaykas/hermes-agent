@@ -27,7 +27,12 @@ produces a merged result, like a merge-queue arbiter.
 - `git merge` or `git rebase` halts on conflicts between two agents' work and
   neither original agent should self-adjudicate.
 - Do NOT use for conflicts within a single agent's own work, or for trivial
-  lockfile/generated-file conflicts (regenerate those instead).
+  lockfile/generated-file conflicts (regenerate those instead: e.g. merge
+  source `content/*.json` / route files first, then regenerate `public/llms.txt`
+  and `public/llms-full.txt` via `node scripts/generate-site-index.mjs` in
+  `kaykas-com` or `node scripts/generate-aeo-artifacts.mjs` in `mira-outbound`,
+  and recompute static corpus-count assertions in `src/lib/articleJsonLd.test.ts`
+  from the merged `content/*.json` count in `dev-tool-reviews`).
 
 ## Prerequisites
 
@@ -120,6 +125,34 @@ explicitly in the hand-back summary.
 - Complete the merge: `git commit` (the default merge message plus a body
   listing hunk decisions is fine).
 - Done when: verification passes and the merge commit exists.
+
+## Derived-Artifact Regeneration & Corpus-Count Reconciliation
+
+When two parallel worktrees add or edit content pages in a Next.js AEO/content
+repo, generated index files (`public/llms.txt`, `public/llms-full.txt`) and
+static JSON-LD corpus-count assertions (`src/lib/articleJsonLd.test.ts`) will
+collide on every merge. Never hand-merge generated index files or guess the
+corpus count — resolve them deterministically in four ordered steps:
+
+1. **Merge source content hunks first.** Resolve and stage all disjoint source
+   content additions/edits (`content/*.json`, `src/data/**`, route files)
+   before touching any generated index or count assertion.
+2. **Regenerate `public/llms.txt` and `public/llms-full.txt`** from the merged
+   source content using the repository's canonical generator:
+   - `kaykas-com` (`/Users/jkw/projects/kaykas-com`):
+     `node scripts/generate-site-index.mjs` (also wired as `npm run prebuild`).
+   - `mira-outbound` (`/Users/jkw/projects/mira-outbound`):
+     `node scripts/generate-aeo-artifacts.mjs`.
+   - `dev-tool-reviews` (`/Users/jkw/projects/dev-tool-reviews`):
+     update `public/llms.txt` and `public/llms-full.txt` entries to include all
+     merged `content/*.json` slugs and verify with `node --test src/lib/llmsFull.test.ts`.
+3. **Recompute static JSON-LD corpus counts** from the merged content directory
+   (e.g. in `dev-tool-reviews`, count the merged `content/*.json` files that
+   carry embedded JSON-LD and update the expected `recordsWithEmbeddedJsonLd`
+   total in `src/lib/articleJsonLd.test.ts` so `base + branch_A_delta + branch_B_delta`
+   matches the on-disk corpus).
+4. **Run tests and production build** (`npm test && npm run build`) and stage
+   the regenerated artifacts before committing the merge.
 
 ### 5. Hand back
 

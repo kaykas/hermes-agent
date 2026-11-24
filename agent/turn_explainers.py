@@ -148,9 +148,12 @@ class TurnExplainersMixin:
                             mgr.record_agent_write(_p)
         if is_error and not landed:
             # Keep the FIRST error per path unless a later success replaces it.
+            # Never track ephemeral scratch probes under cache/scratch/ as failed user deliverables.
             preview = _extract_error_preview(result)
             for path in targets:
                 identity = _file_mutation_identity(path, task_id)
+                if "/cache/scratch/" in identity.replace("\\", "/"):
+                    continue
                 state.setdefault(path, {
                     "tool": tool_name, "error_preview": preview,
                     "identity": identity, "stat": _file_stat_signature(identity),

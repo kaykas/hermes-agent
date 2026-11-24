@@ -41,6 +41,129 @@ logger = logging.getLogger(__name__)
 MAX_POST_ATTACH_RECONNECT_FAILURES = 5
 
 
+def _local_listener_identity(cdp_url: str):
+    """Return (listener_found, pid) for a loopback CDP URL, else None.
+
+    Remote endpoints and inspection failures return None so they keep the existing
+    reconnect budget. A confirmed missing loopback listener stops reconnects.
+    """
+    try:
+        from urllib.parse import urlparse
+        parsed = urlparse(cdp_url)
+        host = parsed.hostname
+        if host not in {"127.0.0.1", "localhost", "::1"}:
+            return None
+        port = parsed.port or (443 if parsed.scheme in {"https", "wss"} else 80)
+    except Exception:
+        return None
+    if host == "127.0.0.1":
+        accepted_ips = {"127.0.0.1", "0.0.0.0", "*"}
+    elif host == "::1":
+        accepted_ips = {"::1", "::", "*"}
+    else:
+        accepted_ips = {"127.0.0.1", "::1", "0.0.0.0", "::", "*"}
+    try:
+        import psutil
+        found = False
+        for conn in psutil.net_connections(kind="tcp"):
+            if conn.status != "LISTEN" or not conn.laddr:
+                continue
+            address = conn.laddr
+            if address.port != port:
+                continue
+            if address.ip not in accepted_ips:
+                continue
+            found = True
+            if conn.pid is not None:
+                return True, conn.pid
+        return found, None
+    except Exception:
+        # The managed production runtime does not necessarily ship psutil.
+        # lsof is already the fleet's POSIX listener-identity primitive.
+        return _lsof_local_listener_identity(port, accepted_ips)
+
+
+def _lsof_local_listener_identity(port: int, accepted_ips: set[str]):
+    """POSIX listener lookup without an optional Python package dependency."""
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-Fpn"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            stdin=subprocess.DEVNULL, timeout=3, check=False,
+        )
+    except Exception:
+        return None
+    if result.returncode == 1 and not result.stdout.strip():
+        return False, None
+    if result.returncode != 0:
+        return None
+    found = False
+    saw_record = False
+    pid = None
+    for line in result.stdout.splitlines():
+        if line.startswith("p"):
+            saw_record = True
+            try:
+                pid = int(line[1:])
+            except ValueError:
+                pid = None
+        elif line.startswith("n") and saw_record:
+            address = line[1:].rsplit(":", 1)[0].strip("[]")
+            if address not in accepted_ips:
+                continue
+            found = True
+            if pid is not None:
+                return True, pid
+    return (found, None) if saw_record else None
+
+
+def _local_process_identity(pid: int) -> tuple[bool, Optional[float]]:
+    """Return (alive, start_time) without making psutil a runtime requirement."""
+    try:
+        import psutil
+    except ImportError:
+        psutil = None
+    if psutil is not None:
+        try:
+            process = psutil.Process(pid)
+            if not process.is_running() or process.status() == psutil.STATUS_ZOMBIE:
+                return False, None
+            try:
+                return True, process.create_time()
+            except Exception:
+                return True, None
+        except psutil.NoSuchProcess:
+            return False, None
+        except Exception:
+            # ps can still answer on macOS when psutil is denied process access.
+            pass
+    import os
+    if os.name == "nt":
+        return True, None
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "stat=", "-o", "lstart="],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            stdin=subprocess.DEVNULL, timeout=3, check=False,
+            env={**os.environ, "LC_ALL": "C"},
+        )
+    except Exception:
+        return True, None
+    line = result.stdout.strip()
+    if result.returncode != 0 or not line:
+        return False, None
+    try:
+        stat, started = line.split(None, 1)
+        if stat.startswith("Z"):
+            return False, None
+        from datetime import datetime
+        return True, datetime.strptime(started.strip(), "%a %b %d %H:%M:%S %Y").timestamp()
+    except (ValueError, TypeError):
+        return True, None
+
+
 def _redact_cdp_error_text(exc: object) -> str:
     """Redact CDP endpoint credentials from an exception's (or URL's) string form.
     ``websockets`` bakes the raw URL (``?token=`` / ``user:pass@``) into its exception
@@ -136,6 +259,11 @@ class CDPSupervisor(DialogSupervisionMixin, FrameTrackingMixin):
         self._documents: dict[str, int] = {}
         # The tab the task's browser_exec daemon last drove (``set_driven_target``); ``focus_page`` prefers it.
         self._driven_target_id: Optional[str] = None
+        # Loopback Chrome identity, captured after the first successful attach.
+        # A dead owner or recycled PID stops reconnects immediately; remote CDP
+        # endpoints keep the transient-drop budget above.
+        self._browser_pid: Optional[int] = None
+        self._browser_process_start: Optional[float] = None
         # Dialog auto-dismiss watchdog handles (per dialog id) + id generator.
         self._dialog_watchdogs: dict[str, asyncio.TimerHandle] = {}
         self._dialog_seq = 0
@@ -458,6 +586,53 @@ class CDPSupervisor(DialogSupervisionMixin, FrameTrackingMixin):
             with contextlib.suppress(Exception):
                 await ws.close()
 
+    def _capture_local_browser_process(self) -> None:
+        # Identity is captured once. Reconnects must validate against the original
+        # owner, never adopt a replacement browser that raced onto the same port.
+        if self._browser_pid is not None:
+            return
+        identity = _local_listener_identity(self.cdp_url)
+        if not identity or not identity[0] or identity[1] is None:
+            return
+        self._browser_pid = identity[1]
+        alive, process_start = _local_process_identity(self._browser_pid)
+        self._browser_process_start = process_start if alive else None
+
+    def _local_browser_process_alive(self) -> bool:
+        """False only for a confirmed dead loopback owner or missing listener.
+
+        Remote Browserbase sessions and local inspection errors retain the bounded
+        reconnect behavior. A captured PID is checked for reuse as well as existence.
+        """
+        identity = _local_listener_identity(self.cdp_url)
+        if identity is None:
+            return True
+        found, listener_pid = identity
+        if self._browser_pid is None:
+            # A loopback reconnect without a captured, identifiable owner cannot
+            # prove it is returning to the same browser. Fail closed locally.
+            return False
+        # Once identity is captured, a missing listener or a different owner is
+        # a hard stop: reconnecting could redial a dead port or attach to another
+        # browser that reused it. A listener without a PID cannot prove ownership.
+        if not found or listener_pid != self._browser_pid:
+            return False
+        alive, current_start = _local_process_identity(self._browser_pid)
+        if not alive:
+            return False
+        if self._browser_process_start is not None and current_start is not None:
+            return abs(current_start - self._browser_process_start) <= 1.0
+        # Do not turn a permission or inspection failure into a browser outage.
+        return True
+
+    def _stop_for_dead_local_browser(self) -> bool:
+        if self._local_browser_process_alive():
+            return False
+        logger.info("CDP supervisor %s: local browser process exited; stopping reconnects", self.task_id)
+        if SUPERVISOR_REGISTRY.get(self.task_id) is self:
+            SUPERVISOR_REGISTRY._pop(self.task_id)
+        return True
+
     def _reconnect_budget_spent(self, failures: int, e: BaseException) -> bool:
         """True once ``failures`` consecutive post-attach reconnects failed: log ONE final line
         and drop this supervisor from the registry so a dead endpoint (its Chrome exited with
@@ -481,6 +656,8 @@ class CDPSupervisor(DialogSupervisionMixin, FrameTrackingMixin):
         from agent.proxy_bypass import loopback_connect_kwargs
         connect_kwargs = {"max_size": 50 * 1024 * 1024, **loopback_connect_kwargs(self.cdp_url)}
         while not self._stop_requested:
+            if last_success_at and self._stop_for_dead_local_browser():
+                return
             try:
                 self._ws = await asyncio.wait_for(websockets.connect(self.cdp_url, **connect_kwargs), timeout=10.0)
             except Exception as e:
@@ -496,6 +673,12 @@ class CDPSupervisor(DialogSupervisionMixin, FrameTrackingMixin):
                 backoff = min(backoff * 2, 10.0)
                 continue
 
+            self._capture_local_browser_process()
+            if last_success_at and self._stop_for_dead_local_browser():
+                # The owner can change between the pre-dial check and connection.
+                # Validate again before attaching to anything on the other end.
+                await self._close_ws()
+                return
             reader_task = asyncio.create_task(self._read_loop(), name="cdp-reader")
             try:
                 # Reset the per-connection page session id; ``_pending_dialogs`` / ``_frames``
@@ -535,6 +718,8 @@ class CDPSupervisor(DialogSupervisionMixin, FrameTrackingMixin):
                         fut.set_exception(ConnectionError("CDP connection closed before reply"))
                 self._pending_calls.clear()
 
+            if self._stop_for_dead_local_browser():
+                return
             if self._stop_requested:
                 return
             logger.debug("CDP supervisor %s: reconnecting in %.1fs...", self.task_id, backoff)

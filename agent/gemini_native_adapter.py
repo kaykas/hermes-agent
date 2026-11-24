@@ -423,6 +423,10 @@ def _merge_alternating(contents: list[dict[str, Any]]) -> list[dict[str, Any]]:
             merged[-1]["parts"].extend(content["parts"])
         else:
             merged.append(content)
+    if merged and merged[0]["role"] == "model" and any(
+        c["role"] == "user" and not _has_function_response(c) for c in merged
+    ):
+        merged.insert(0, {"role": "user", "parts": [{"text": _INTERRUPTED_RESPONSE_PLACEHOLDER}]})
     return merged
 
 

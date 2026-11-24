@@ -51,6 +51,29 @@ def _macos_protected_search_exclusions(
     return exclusions
 
 
+def _virtual_fs_search_exclusions(
+    path: str, *, cwd: Optional[str] = None, home: Optional[str] = None,
+    platform: Optional[str] = None,
+) -> list[str]:
+    """Root-relative virtual filesystem and large cache trees to prune on macOS."""
+    if (platform or sys.platform) != "darwin":
+        return []
+    root = Path(path).expanduser()
+    if not root.is_absolute():
+        root = Path(cwd or os.getcwd()) / root
+    root = Path(os.path.normpath(str(root)))
+    home_path = Path(os.path.normpath(str(Path(home or Path.home()).expanduser())))
+    exclusions: list[str] = []
+    for absolute in (Path("/dev/fd"), Path("/private/var/agentx"), home_path / "Library" / "Caches"):
+        try:
+            relative = absolute.relative_to(root)
+        except ValueError:
+            continue
+        if relative.parts:
+            exclusions.append(relative.as_posix())
+    return exclusions
+
+
 # --- Filename-walk admission: one walk per (backend, root) at a time --------------
 
 _FILENAME_SEARCH_ADMISSION = threading.Condition()
@@ -513,6 +536,23 @@ def _find_literal_path_expressions(roots: list[str]) -> list[str]:
     return [re.sub(r"([*?\[\]])", r"\\\1", root) for root in roots]
 
 
+# Regex-only syntax that a filename glob never means: alternation, backslash
+# character classes, and ^/$ anchors (``[^...]`` is glob negation, so only a
+# leading ^ counts). Passing these as a target='files' pattern silently matches
+# nothing, which models then read as "the file is absent".
+_GLOB_REGEX_TOKENS = (
+    ("|", re.compile(r"\|")),
+    ("\\d/\\w/\\s", re.compile(r"\\[dDwWsSb](?![A-Za-z])")),
+    ("^", re.compile(r"^\^")),
+    ("$", re.compile(r"(?<!\\)\$$")),
+)
+
+
+def _regex_tokens_in_glob(pattern: str) -> list[str]:
+    """Regex-only tokens found in a filename glob, in a stable order."""
+    return [label for label, rx in _GLOB_REGEX_TOKENS if rx.search(pattern)]
+
+
 class SearchMixin:
     """File-name and content search via rg with find/grep fallbacks. Requires
     ``_exec``, ``_has_command``, ``_expand_path``, ``_escape_shell_arg``,
@@ -623,6 +663,16 @@ class SearchMixin:
         proc._hermes_pgid = proc.pid
         proc._hermes_pgid_start = get_process_start_time(proc.pid)
 
+        # Native Popen does not pass through LocalEnvironment._run_bash, so capture
+        # the same process-group identity here. A fast rg may exit before cleanup;
+        # the cached identity keeps that teardown safe and prevents PID-reuse kills.
+        try:
+            proc._hermes_pgid = os.getpgid(proc.pid)  # type: ignore[attr-defined]
+            from gateway.status import get_process_start_time
+            proc._hermes_pgid_start = get_process_start_time(proc.pid)  # type: ignore[attr-defined]
+        except ProcessLookupError:
+            pass
+
         # Drain on a thread so a silent rg (huge tree, no hits yet) cannot pin the
         # caller past the deadline or past a /stop; the waiter below owns both.
         lines: list[bytes] = []
@@ -713,7 +763,9 @@ class SearchMixin:
             return []
         from tools import file_operations as _fo  # lazy: _HOME is monkeypatched there
         cwd = getattr(self.env, "cwd", None) or self.cwd
-        return _macos_protected_search_exclusions(path, cwd=cwd, home=_fo._HOME, platform=sys.platform)
+        protected = _macos_protected_search_exclusions(path, cwd=cwd, home=_fo._HOME, platform=sys.platform)
+        virtual = _virtual_fs_search_exclusions(path, cwd=cwd, home=_fo._HOME, platform=sys.platform)
+        return list(dict.fromkeys([*protected, *virtual]))
 
     def _protected_prune_paths(self, path: str) -> list[str]:
         """Absolute-ish protected paths for find's ``-path ... -prune``."""
@@ -786,6 +838,50 @@ class SearchMixin:
             return ExecuteResult(stdout="exists" if os.path.exists(full) else "not_found")
         return self._exec(f"test -e {self._escape_shell_arg(path)} && echo exists || echo not_found")
 
+    def _preflight_validate_search(self, pattern: str, path: str, target: str,
+                                   file_glob: Optional[str],
+                                   order: str = "discovery") -> Optional[SearchResult]:
+        """Reject a search whose syntax does not fit its target before any
+        traversal starts, or None to proceed. A regex in a filename glob matches
+        nothing (a false "absent"); an unscoped content regex over $HOME or wider
+        runs into the timeout and gets the rg child killed mid-walk, and so does an
+        exact newest-first filename scan, which must walk the whole tree."""
+        if target == "files":
+            tokens = _regex_tokens_in_glob(pattern)
+            if tokens:
+                return SearchResult(error=(
+                    f"target='files' takes a filename glob, not a regex; {pattern!r} "
+                    f"contains regex syntax ({', '.join(tokens)}). Use glob wildcards "
+                    "such as '*config*', '*.py' or '*.{yml,yaml}' (braces for "
+                    "alternatives), or use target='content' for a regex."))
+            if order == "modified" and self._is_broad_local_search_root(path):
+                return SearchResult(error=(
+                    f"order='modified' over {path} must scan the entire tree before it "
+                    "can return the newest file and can exceed the search timeout. "
+                    "Search a project subdirectory, or use the default "
+                    "order='discovery'."))
+            if self._is_broad_local_search_root(path):
+                return SearchResult(error=(
+                    f"File search over {path} is unbounded: recursive traversal of "
+                    "root, home, or a shared agent state store can hit virtual "
+                    "filesystems, protected caches, and the search timeout. Narrow "
+                    "path to a specific project or script subdirectory."))
+            return None
+        if not self._is_broad_local_search_root(path):
+            return None
+        from tools import file_operations as _fo  # lazy: _HOME is monkeypatched there
+        home_root = os.path.normcase(os.path.realpath(_fo._HOME))
+        is_home = os.path.normcase(os.path.realpath(path)) == home_root
+        if is_home and file_glob:
+            return None
+        scope = ("a file_glob filter (e.g. '*.py')" if is_home
+                 else "a project subdirectory below your home directory")
+        return SearchResult(error=(
+            f"Content search over {path} is unbounded: a regex across the whole tree "
+            f"can exceed the search timeout and return nothing. Narrow it with {scope}; "
+            "if you are checking whether a file exists, search a specific subdirectory "
+            "with target='files' instead."))
+
     def _dispatch_search(self, pattern: str, path: str, target: str,
                          file_glob: Optional[str], limit: int, offset: int,
                          output_mode: str, context: int, order: str = "discovery") -> SearchResult:
@@ -793,21 +889,34 @@ class SearchMixin:
             return self._search_files(pattern, path, limit, offset, order)
         return self._search_content(pattern, path, file_glob, limit, offset, output_mode, context)
 
+    _PARENT_LISTING_CAP = 2000
+
     def _path_not_found_result(self, path: str) -> SearchResult:
         """Error result for a missing search root, with nearby-entry suggestions."""
         parent = os.path.dirname(path) or "."
         basename_query = os.path.basename(path)
         hint_parts = [f"Path not found: {path}"]
         parent_check = self._exec(f"test -d {self._escape_shell_arg(parent)} && echo yes || echo no")
-        if "yes" in parent_check.stdout and basename_query:
-            ls_result = self._exec(f"ls -1 -- {self._escape_shell_arg(parent)} 2>/dev/null | head -20")
-            if ls_result.exit_code == 0 and ls_result.stdout.strip():
-                lq = basename_query.lower()
-                candidates = [
-                    os.path.join(parent, e) for e in ls_result.stdout.strip().split('\n')
-                    if e and (lq in e.lower() or e.lower() in lq or e.lower().startswith(lq[:3]))]
-                if candidates:
-                    hint_parts.append("Similar paths: " + ", ".join(candidates[:5]))
+        if "yes" not in parent_check.stdout:
+            # Absence of the leaf says nothing until the parent is known to exist.
+            hint_parts.append(f"Parent directory {parent} does not exist either; "
+                              "verify the path from a higher directory")
+            return SearchResult(error=". ".join(hint_parts), total_count=0)
+        if basename_query:
+            # Single-level listing of the parent: a capped head would hide the
+            # very entry being looked for in a large directory.
+            ls_result = self._exec(
+                f"ls -1A {self._escape_shell_arg(parent)} 2>/dev/null | head -{self._PARENT_LISTING_CAP}")
+            entries = [e for e in ls_result.stdout.strip().split('\n') if e] if ls_result.exit_code == 0 else []
+            lq = basename_query.lower()
+            candidates = [
+                os.path.join(parent, e) for e in entries
+                if lq in e.lower() or e.lower() in lq or e.lower().startswith(lq[:3])]
+            if candidates:
+                hint_parts.append("Similar paths: " + ", ".join(candidates[:5]))
+            else:
+                hint_parts.append(f"Parent directory {parent} exists ({len(entries)} entries "
+                                  "listed); none resemble the requested name")
         return SearchResult(error=". ".join(hint_parts), total_count=0)
 
     def _try_multi_path_search(self, pattern: str, path: str, target: str,
@@ -931,6 +1040,7 @@ class SearchMixin:
             return False
 
         def normalized(value: str) -> str:
+            value = os.path.expanduser(value)
             if _IS_WINDOWS:
                 value = _msys_to_windows_path(value).replace("\\", "/")
             if not os.path.isabs(value):
@@ -947,6 +1057,13 @@ class SearchMixin:
         drive = os.path.splitdrive(root)[0]
         anchor = drive + os.sep if drive else os.path.abspath(os.sep)
         if root == os.path.normcase(anchor):
+            return True
+        # Shared agent stores contain many unrelated profiles, archives, caches,
+        # and credentials-adjacent trees. Require a narrower project/script root.
+        if root in {
+            normalized(os.path.join(home, ".hermes")),
+            normalized(os.path.join(home, ".claude", "projects")),
+        }:
             return True
         try:
             common = os.path.commonpath([root, home])
@@ -1355,15 +1472,22 @@ class SearchMixin:
             cmd_parts.append("--multiline")
         if context > 0:
             cmd_parts.extend(["-C", str(context)])
-        cmd_parts.extend(self._rg_exclusion_globs(path))
         if file_glob:
             cmd_parts.extend(["--glob", self._escape_shell_arg(file_glob)])
+        # Ripgrep applies the last matching glob: protected-folder exclusions
+        # must follow the positive file_glob or that include re-admits them.
+        cmd_parts.extend(self._rg_exclusion_globs(path))
         if output_mode in _OUTPUT_MODE_FLAGS:
             cmd_parts.append(_OUTPUT_MODE_FLAGS[output_mode])
         # Quoting protects shell syntax, not rg's option parser (also on native argv).
         cmd_parts.extend(["-e", self._escape_shell_arg(pattern, translate_path=False), "--"])
-        # rg is a native Windows binary (winget/cargo/choco): needs C:/... not MSYS /c/...
-        cmd_parts.append(self._escape_native_tool_arg(path))
+        # A symlinked absolute root (notably /tmp and /var on macOS) makes rg
+        # evaluate root-relative exclusion globs against the canonical path.
+        # Search the canonical root so protected-folder exclusions still match.
+        search_root = path
+        if os.path.isabs(path) and getattr(self.env, "is_local", True) is not False:
+            search_root = os.path.realpath(path)
+        cmd_parts.append(self._escape_native_tool_arg(search_root))
         ml_note = (
             "Pattern contains \\n — multiline mode (-U) was enabled automatically "
             "so the regex can match across line boundaries."

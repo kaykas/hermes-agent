@@ -25,7 +25,8 @@ from tools.skills_tool_plugin import (
     MAX_DESCRIPTION_LENGTH, MAX_NAME_LENGTH, _INJECTION_PATTERNS, _fail, _json,
     _mark_background_review_read, _preprocess_skill, _read_skill_text, _safe_frontmatter,
     _serve_plugin_skill, _serve_skill_file, _truncate_description)
-from tools.skills_tool_dedup import dedup_skill_view, reset_skill_view_dedup
+from tools.skills_tool_dedup import (
+    dedup_skill_view, record_missing_skill, repeated_missing_skill, reset_skill_view_dedup)
 from tools.skill_provenance import is_background_review
 
 logger = logging.getLogger(__name__)
@@ -551,7 +552,7 @@ def _owning_search_dir(skill_md: Path, all_dirs) -> Optional[Path]:
     return max(owners, key=lambda d: len(d.parts), default=None)
 
 
-def locate_skill(name: str, local_category_name: Optional[str], roots):
+def locate_skill(name: str, local_category_name: Optional[str], roots, task_id: str | None = None):
     """Unique on-disk skill for *name* over ``(tier, dir)`` *roots*: cross-tier precedence
     (project > local > create_dir > external, shadowed copies logged), same-tier collision refusal,
     same-root identical-copy ranking, quarantine gate, not-found listing. ``(error_json, skill_dir,
@@ -600,9 +601,11 @@ def locate_skill(name: str, local_category_name: Optional[str], roots):
                 hint="Inspect the skill in the repo checkout, or untrust the repo with "
                 "`hermes skills untrust`."), None, None
     if not skill_md or not skill_md.exists():
-        available = [s["name"] for s in sort_skills(find_all_skills())[:20]]
+        available = record_missing_skill(
+            task_id, name, lambda: [s["name"] for s in sort_skills(find_all_skills())])
         return _fail(f"Skill '{name}' not found.", available_skills=available,
-                     hint="Use skills_list to see all available skills"), None, None
+                     closest_matches=available,
+                     hint="Use one of the closest installed skill names, or skills_list to see all available skills"), None, None
     return None, skill_dir, skill_md
 
 
@@ -642,6 +645,12 @@ def skill_view(
         # reinterpreted as a plugin namespace.
         if lookup_error := skill_lookup_path_error(name):
             return _fail(lookup_error, hint=_LOOKUP_HINT)
+        if (repeated := repeated_missing_skill(task_id, name)) is not None:
+            return _fail(
+                f"Skill '{name}' was already not found in this turn; repeated missing-skill lookup blocked.",
+                available_skills=repeated, closest_matches=repeated,
+                duplicate_missing=True, blocked=True,
+                hint="Use one of the closest installed skill names instead of retrying the same missing slug.")
         local_category_name: str | None = None
         if ":" in name:  # plugin registry; bare names use the flat-tree scan below
             served, local_category_name = _resolve_plugin_skill(name, file_path, task_id, preprocess)
@@ -653,7 +662,7 @@ def skill_view(
             return _fail(lookup_error, hint=_LOOKUP_HINT)
         roots, active_skills_dir = skill_search_dirs()
         all_dirs = [d for _t, d in roots]
-        error, skill_dir, skill_md = locate_skill(name, local_category_name, roots)
+        error, skill_dir, skill_md = locate_skill(name, local_category_name, roots, task_id=task_id)
         if error is not None:
             return error
         try:  # read once — reused for platform check and main content

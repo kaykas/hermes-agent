@@ -23,6 +23,7 @@ enabler: #80774.
 from __future__ import annotations
 
 import json
+import os
 import sys
 
 import pytest
@@ -42,10 +43,25 @@ def hermes_env(tmp_path, monkeypatch, cron_owner):
     import importlib
     import hermes_constants
     importlib.reload(hermes_constants)
+    import pm.environments
+    importlib.reload(pm.environments)
     import cron.jobs
     importlib.reload(cron.jobs)
     import cron.monitor
     importlib.reload(cron.monitor)
+    import cron.scheduler_script
+    importlib.reload(cron.scheduler_script)
+    monkeypatch.setattr(
+        cron.scheduler_script,
+        "_posix_cron_script_argv",
+        lambda script: ([sys.executable, str(script)], {}),
+    )
+    import tools.environments.local
+    monkeypatch.setattr(
+        tools.environments.local,
+        "build_subprocess_env",
+        lambda base=None, **_kwargs: dict(base) if base is not None else os.environ.copy(),
+    )
     import cron.scheduler
     importlib.reload(cron.scheduler)
 
@@ -251,6 +267,23 @@ def _make_monitor_job(hermes_env, script_body: str):
     )
 
 
+def _require_job(job_id: str):
+    from cron.jobs import get_job
+
+    job = get_job(job_id)
+    assert job is not None
+    return job
+
+
+def _run_job_and_record(job: dict):
+    from cron.jobs import mark_job_run
+    from cron.scheduler import run_job
+
+    result = run_job(job)
+    mark_job_run(job["id"], result[0], result[3])
+    return result
+
+
 def test_first_run_always_runs_agent(hermes_env, monkeypatch):
     from cron.scheduler import run_job
 
@@ -416,6 +449,159 @@ def test_monitor_script_failure_is_error_not_change(hermes_env, monkeypatch):
     assert observed["agent_runs"] == 1  # agent NOT invoked on source failure
     # Stored hash untouched — a later recovery to 'state A' still suppresses.
     assert get_job(job["id"])["monitor_state"]["last_output_hash"] == stored_hash
+
+
+def test_failed_monitor_work_retries_then_latches_success(hermes_env, monkeypatch):
+    job = _make_monitor_job(hermes_env, "echo 'state A'\n")
+    observed: dict = {}
+    _install_agent_stubs(monkeypatch, observed)
+
+    class FlakyAgent:
+        def __init__(self, **kwargs):
+            pass
+
+        def run_conversation(self, prompt, *_a, **_kw):
+            observed["agent_runs"] += 1
+            observed["prompts"].append(prompt)
+            if observed["agent_runs"] <= 2:
+                return {"failed": True, "error": "temporary failure", "messages": []}
+            return {"final_response": "agent done", "messages": []}
+
+        def get_activity_summary(self):
+            return {"seconds_since_activity": 0.0}
+
+    monkeypatch.setattr(sys.modules["run_agent"], "AIAgent", FlakyAgent)
+    for expected_attempt in (1, 2):
+        success, _doc, _final, error = _run_job_and_record(_require_job(job["id"]))
+        assert success is False and error is not None
+        state = _require_job(job["id"])["monitor_state"]
+        assert state["retry_count"] == expected_attempt
+        assert state["last_output_hash"]
+        assert state["agent_attempt_required"] is True
+
+    success, _doc, _final, error = _run_job_and_record(_require_job(job["id"]))
+    assert success is True and error is None
+    state = _require_job(job["id"])["monitor_state"]
+    assert state["last_output_hash"]
+    assert state["retry_count"] == 0
+    assert state["agent_attempt_required"] is False
+
+    success, _doc, _final, error = _run_job_and_record(_require_job(job["id"]))
+    assert success is True and error is None
+    assert observed["agent_runs"] == 3
+
+
+def test_failed_monitor_work_stops_after_three_attempts_until_content_changes(hermes_env, monkeypatch):
+    job = _make_monitor_job(hermes_env, "echo 'state A'\n")
+    observed: dict = {}
+    _install_agent_stubs(monkeypatch, observed)
+
+    class FailingAgent:
+        def __init__(self, **kwargs):
+            pass
+
+        def run_conversation(self, prompt, *_a, **_kw):
+            observed["agent_runs"] += 1
+            observed["prompts"].append(prompt)
+            return {"failed": True, "error": "persistent failure", "messages": []}
+
+        def get_activity_summary(self):
+            return {"seconds_since_activity": 0.0}
+
+    monkeypatch.setattr(sys.modules["run_agent"], "AIAgent", FailingAgent)
+    for expected_attempt in (1, 2, 3):
+        success, _doc, _final, error = _run_job_and_record(_require_job(job["id"]))
+        assert success is False and error is not None
+        assert _require_job(job["id"])["monitor_state"]["retry_count"] == expected_attempt
+
+    state = _require_job(job["id"])["monitor_state"]
+    assert state["last_output_hash"]
+    assert state["agent_attempt_required"] is False
+    success, _doc, _final, error = _run_job_and_record(_require_job(job["id"]))
+    assert success is True and error is None
+    assert observed["agent_runs"] == 3
+
+    _write_script(hermes_env, "mon.sh", "echo 'state B'\n")
+    success, _doc, _final, error = _run_job_and_record(_require_job(job["id"]))
+    assert success is False and error is not None
+    assert observed["agent_runs"] == 4
+    state = _require_job(job["id"])["monitor_state"]
+    assert state["retry_count"] == 1
+    assert state["agent_attempt_required"] is True
+
+
+def test_new_content_during_retry_resets_budget(hermes_env, monkeypatch):
+    job = _make_monitor_job(hermes_env, "echo 'state A'\n")
+    observed: dict = {}
+    _install_agent_stubs(monkeypatch, observed)
+
+    class FailingAgent:
+        def __init__(self, **kwargs):
+            pass
+
+        def run_conversation(self, prompt, *_a, **_kw):
+            observed["agent_runs"] += 1
+            observed["prompts"].append(prompt)
+            return {"failed": True, "error": "persistent failure", "messages": []}
+
+        def get_activity_summary(self):
+            return {"seconds_since_activity": 0.0}
+
+    monkeypatch.setattr(sys.modules["run_agent"], "AIAgent", FailingAgent)
+    success, _doc, _final, error = _run_job_and_record(_require_job(job["id"]))
+    assert success is False and error is not None
+    assert _require_job(job["id"])["monitor_state"]["retry_count"] == 1
+
+    _write_script(hermes_env, "mon.sh", "echo 'state B'\n")
+    success, _doc, _final, error = _run_job_and_record(_require_job(job["id"]))
+    assert success is False and error is not None
+    state = _require_job(job["id"])["monitor_state"]
+    assert state["retry_count"] == 1
+    assert state["agent_attempt_required"] is True
+    assert observed["agent_runs"] == 2
+    assert "state B" in observed["prompts"][1]
+
+
+def test_source_failure_does_not_consume_agent_retry(hermes_env, monkeypatch):
+    job = _make_monitor_job(hermes_env, "echo 'state A'\n")
+    observed: dict = {}
+    _install_agent_stubs(monkeypatch, observed)
+
+    class FailingAgent:
+        def __init__(self, **kwargs):
+            pass
+
+        def run_conversation(self, prompt, *_a, **_kw):
+            observed["agent_runs"] += 1
+            observed["prompts"].append(prompt)
+            return {"failed": True, "error": "persistent failure", "messages": []}
+
+        def get_activity_summary(self):
+            return {"seconds_since_activity": 0.0}
+
+    monkeypatch.setattr(sys.modules["run_agent"], "AIAgent", FailingAgent)
+    success, _doc, _final, error = _run_job_and_record(_require_job(job["id"]))
+    assert success is False and error is not None
+    state = _require_job(job["id"])["monitor_state"]
+    assert state["retry_count"] == 1
+    stored_hash = state["last_output_hash"]
+
+    _write_script(hermes_env, "mon.sh", "echo source-down >&2\nexit 3\n")
+    success, _doc, _final, error = _run_job_and_record(_require_job(job["id"]))
+    assert success is False and error is not None
+    state = _require_job(job["id"])["monitor_state"]
+    assert state["retry_count"] == 1
+    assert state["last_output_hash"] == stored_hash
+    assert observed["agent_runs"] == 1
+
+    _write_script(hermes_env, "mon.sh", "echo 'state A'\n")
+    success, _doc, _final, error = _run_job_and_record(_require_job(job["id"]))
+    assert success is False and error is not None
+    state = _require_job(job["id"])["monitor_state"]
+    assert state["retry_count"] == 2
+    assert state["last_output_hash"] == stored_hash
+    assert observed["agent_runs"] == 2
+    assert "MONITOR RETRY (attempt 2 of 3)" in observed["prompts"][1]
 
 
 # ---------------------------------------------------------------------------

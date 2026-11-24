@@ -56,6 +56,38 @@ def _slack_connection_key():
     )
 
 
+class TestOperatorLinkActions:
+    @pytest.mark.asyncio
+    async def test_operator_link_click_is_acked_without_agent_turn(self):
+        adapter, client = _make_adapter()
+        ack = AsyncMock()
+        body = {
+            "user": {"id": "U1"},
+            "channel": {"id": "C1"},
+            "message": {"ts": "111.222"},
+        }
+
+        await adapter._handle_operator_link_action(
+            ack, body, {"action_id": "operator.link.0"}
+        )
+
+        ack.assert_awaited_once_with()
+        client.chat_postMessage.assert_not_called()
+
+    def test_operator_link_regex_listener_is_registered(self):
+        adapter, _client = _make_adapter()
+        adapter._app.action = MagicMock(return_value=lambda handler: handler)
+
+        adapter._register_bolt_handlers()
+
+        matches = []
+        for item in adapter._app.action.call_args_list:
+            matcher = item.args[0]
+            if getattr(matcher, "pattern", None) == r"^operator\.link\.\d+$":
+                matches.append(item)
+        assert len(matches) == 1
+
+
 class TestSendMessageBlocks:
     @pytest.mark.asyncio
     async def test_disabled_by_default_no_blocks(self):
