@@ -14,6 +14,13 @@ from tests.fixtures.storage_holder import policy_key
 _CONFIG = 'platform_toolsets: {cli: []}\nmodel: {provider: custom, default: m, base_url: http://x.invalid/v1}\n'
 
 
+@pytest.fixture(autouse=True)
+def _no_hermes_path_injection(monkeypatch):
+    """Keep the host's Hermes shim out of these daemon/client PATH contract probes."""
+    from tools.environments import local
+    monkeypatch.setattr(local, '_HERMES_BIN_DIR', None)
+
+
 async def _owner(home, monkeypatch):
     from gateway import run
     from gateway.config import GatewayConfig
@@ -411,7 +418,8 @@ async def test_runtime_describe_lists_client_env(tmp_path, monkeypatch):
         close_stores_under(owner.persistence.scope.profile_dir)
 
 
-def test_auto_started_gateway_does_not_inherit_client_behaviour_env(tmp_path, monkeypatch):
+@pytest.mark.parametrize('use_launchd_job', [False, True])
+def test_auto_started_gateway_does_not_inherit_client_behaviour_env(tmp_path, monkeypatch, use_launchd_job):
     from hermes_cli import gateway_runtime_start
     home = tmp_path / 'home'
     home.mkdir()
@@ -421,11 +429,24 @@ def test_auto_started_gateway_does_not_inherit_client_behaviour_env(tmp_path, mo
         captured.update(kwargs['env'])
         return SimpleNamespace(pid=1)
     monkeypatch.setattr(gateway_runtime_start.subprocess, 'Popen', popen)
+    job_envs = []
+
+    def start_job(command, **kwargs):
+        job_envs.append(kwargs)
+        return SimpleNamespace(pid=1) if use_launchd_job else None
+
+    # Cover both the macOS launchd hand-off and the detached-Popen fallback.
+    monkeypatch.setattr(gateway_runtime_start, 'start_gateway_job', start_job)
     for name in ('HERMES_EPHEMERAL_SYSTEM_PROMPT', 'HERMES_PREFILL_MESSAGES_FILE', 'HERMES_INFERENCE_PROVIDER',
                  'HERMES_ENABLE_PROJECT_PLUGINS', 'HERMES_TUI_CLIENT_ENV'):
         monkeypatch.setenv(name, 'from-the-first-client')
     monkeypatch.setenv('PATH', '/client/bin:/usr/bin')
     gateway_runtime_start.spawn_unmanaged_gateway(home, deadline=time.monotonic() + 30)
+    if use_launchd_job:
+        assert len(job_envs) == 1 and not captured
+        captured.update(job_envs[0]['env'])
+    else:
+        assert len(job_envs) == 1 and captured  # the job helper declined, then Popen ran
     leaked = sorted(name for name, value in captured.items() if value == 'from-the-first-client')
     assert leaked == []
     assert captured['PATH']  # the daemon still needs a PATH of its own
