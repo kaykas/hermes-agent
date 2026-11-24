@@ -220,7 +220,12 @@ class StatusReporter:
             self._confirming = asyncio.get_running_loop().create_task(self._confirm())
             # Unread when every caller was cancelled, the loop would log the error's text.
             self._confirming.add_done_callback(consume_detached_task_result)
-        return await asyncio.shield(self._confirming)
+        confirming = self._confirming
+        # asyncio.shield installs an unconditional error reporter on the inner task when every
+        # caller cancels. asyncio.wait has the same detached-cancellation semantics without that
+        # secondary log; the confirmation's own callback above retrieves its failure.
+        done, _ = await asyncio.wait({confirming})
+        return done.pop().result()
 
     async def _confirm(self) -> bool:
         taking = self._submit(acquire_scoped_lock, _LOCK_SCOPE, self._target.url)

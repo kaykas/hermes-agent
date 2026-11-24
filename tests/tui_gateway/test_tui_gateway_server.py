@@ -4796,6 +4796,19 @@ def test_startup_runtime_does_not_call_network_detector(monkeypatch):
     assert provider in {None, "anthropic"}
 
 
+def _patch_prompt_threads(monkeypatch, fake_thread):
+    """Fake only prompt workers; unrelated threads (storage scans, discovery) stay real."""
+    real_thread = threading.Thread
+
+    def selective_thread(*args, **kwargs):
+        name = str(kwargs.get("name") or "")
+        if name.startswith(("prompt-submit-", "prompt-turn-")):
+            return fake_thread(*args, **kwargs)
+        return real_thread(*args, **kwargs)
+
+    monkeypatch.setattr(server.threading, "Thread", selective_thread)
+
+
 def _session(agent=None, **extra):
     return {
         "agent": agent if agent is not None else types.SimpleNamespace(),
@@ -14232,11 +14245,12 @@ def test_run_prompt_submit_registers_turn_thread_for_interrupt(monkeypatch):
     server._sessions["sid"] = session
 
     try:
-        monkeypatch.setattr(server.threading, "Thread", _FakeThread)
+        _patch_prompt_threads(monkeypatch, _FakeThread)
         monkeypatch.setattr(server, "_emit", lambda *args, **kwargs: None)
 
         server._run_prompt_submit("1", "sid", session, "hello")
 
+        assert calls["started"] is True
         assert session.get("_run_thread") is not None
         resp = server.handle_request(
             {"id": "2", "method": "session.interrupt", "params": {"session_id": "sid"}}
@@ -14301,7 +14315,7 @@ def test_interrupt_before_agent_ready_prevents_late_turn_start(monkeypatch):
     server._sessions["sid"] = session
 
     try:
-        monkeypatch.setattr(server.threading, "Thread", _FakeThread)
+        _patch_prompt_threads(monkeypatch, _FakeThread)
         monkeypatch.setattr(server, "_emit", lambda *args, **kwargs: None)
         monkeypatch.setattr(server, "_ensure_session_db_row", lambda session: None)
         monkeypatch.setattr(server, "_persist_branch_seed", lambda session: None)
@@ -14371,7 +14385,7 @@ def test_cancelled_turn_before_agent_ready_emits_error_event(monkeypatch):
     server._sessions["sid"] = session
 
     try:
-        monkeypatch.setattr(server.threading, "Thread", _FakeThread)
+        _patch_prompt_threads(monkeypatch, _FakeThread)
         monkeypatch.setattr(server, "_emit", lambda *args, **kwargs: emitted.append(args))
         monkeypatch.setattr(server, "_ensure_session_db_row", lambda session: None)
         monkeypatch.setattr(server, "_persist_branch_seed", lambda session: None)
@@ -14443,7 +14457,7 @@ def test_session_not_running_before_agent_ready_emits_error_event(monkeypatch):
     server._sessions["sid"] = session
 
     try:
-        monkeypatch.setattr(server.threading, "Thread", _FakeThread)
+        _patch_prompt_threads(monkeypatch, _FakeThread)
         monkeypatch.setattr(server, "_emit", lambda *args, **kwargs: emitted.append(args))
         monkeypatch.setattr(server, "_ensure_session_db_row", lambda session: None)
         monkeypatch.setattr(server, "_persist_branch_seed", lambda session: None)
@@ -14529,7 +14543,7 @@ def test_slow_agent_build_delivers_prompt_instead_of_timing_out(monkeypatch):
     session["agent_ready"] = _SlowReady()
 
     try:
-        monkeypatch.setattr(server.threading, "Thread", _FakeThread)
+        _patch_prompt_threads(monkeypatch, _FakeThread)
         monkeypatch.setattr(server, "_emit", lambda *args, **kwargs: emitted.append(args))
         monkeypatch.setattr(server, "_ensure_session_db_row", lambda session: None)
         monkeypatch.setattr(server, "_persist_branch_seed", lambda session: None)
@@ -14602,7 +14616,7 @@ def test_slow_agent_build_emits_keyed_progress_notice(monkeypatch):
     session["agent_ready"] = _SlowReady()
 
     try:
-        monkeypatch.setattr(server.threading, "Thread", _FakeThread)
+        _patch_prompt_threads(monkeypatch, _FakeThread)
         # Every wait slice lands past the slow threshold.
         monkeypatch.setattr(server, "_AGENT_BUILD_SLOW_NOTICE_AFTER", 0.0)
         monkeypatch.setattr(server, "_emit", lambda *args, **kwargs: emitted.append(args))
@@ -14676,7 +14690,7 @@ def test_agent_build_failure_surfaces_error_and_drops_turn(monkeypatch):
         session["agent_ready"].set()
 
     try:
-        monkeypatch.setattr(server.threading, "Thread", _FakeThread)
+        _patch_prompt_threads(monkeypatch, _FakeThread)
         monkeypatch.setattr(server, "_emit", lambda *args, **kwargs: emitted.append(args))
         monkeypatch.setattr(server, "_ensure_session_db_row", lambda session: None)
         monkeypatch.setattr(server, "_persist_branch_seed", lambda session: None)

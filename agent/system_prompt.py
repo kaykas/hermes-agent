@@ -628,12 +628,13 @@ def _alibaba_identity_part(agent: Any) -> list[str]:
 
 
 def _workspace_pin_key() -> str:
-    """The directory the workspace probe inspects, which is also the prompt's ``Current working
-    directory``: a build with no cwd bound (launch dir) and a later one binding that same dir
-    (TUI ``/compress``) are one workspace, not two."""
+    """The canonical directory the workspace probe inspects, which is also the prompt's
+    ``Current working directory``: a build with no cwd bound (launch dir) and a later one
+    binding that same dir (TUI ``/compress``) are one workspace, not two."""
     try:
-        return str(resolve_context_cwd() or resolve_agent_cwd())
-    except OSError:  # deleted cwd
+        cwd = resolve_context_cwd() or resolve_agent_cwd()
+        return str(Path(cwd).resolve()) if cwd else ""
+    except (OSError, RuntimeError):  # deleted cwd / symlink loop (RuntimeError before Python 3.13)
         return ""
 
 
@@ -688,8 +689,13 @@ def _seed_workspace_pin(agent: Any, key: str) -> None:
     if not prompt:
         return
     stored_cwd = runtime_host_value(prompt, "Current working directory")
-    if stored_cwd and stored_cwd != key:
-        return
+    if stored_cwd:
+        try:
+            stored_cwd = str(Path(stored_cwd).resolve())
+        except (OSError, RuntimeError):  # Python < 3.13 reports symlink loops as RuntimeError
+            return
+        if stored_cwd != key:
+            return
     block = _persisted_workspace_block(prompt, key)
     # Only a real snapshot is adopted: a prompt without one (built on a surface without the
     # coding posture, or with tools off) leaves the pin open so this build captures one.
