@@ -130,6 +130,24 @@ def _set_cdp_env(env: dict, cdp: str) -> None:
     env["BU_CDP_URL" if cdp.startswith(("http://", "https://")) else "BU_CDP_WS"] = cdp
 
 
+def _resolve_fleet_broker(env: dict, session: str) -> Optional[str]:
+    """Route an explicitly leased fleet-browser session to its isolated CDP endpoint."""
+    if not session.startswith("fb-"):
+        return None
+    import sqlite3
+    root = Path(os.environ.get("FLEET_BROWSER_HOME", str(Path.home() / ".hermes" / "browser-broker")))
+    con = sqlite3.connect(f"file:{root / 'broker.db'}?mode=ro", uri=True)
+    try:
+        row = con.execute("SELECT port,status FROM sessions WHERE id=?", (session,)).fetchone()
+    finally:
+        con.close()
+    if not row or row[1] != "active" or not row[0]:
+        return "Fleet broker session is missing, closed, or has no live endpoint; recover it first."
+    _set_cdp_env(env, f"http://127.0.0.1:{row[0]}")
+    env[_PRIVATE_BROWSER_SENTINEL] = "1"
+    return None
+
+
 def _has_cdp_env(env: dict) -> bool:
     return bool(env.get("BU_CDP_WS") or env.get("BU_CDP_URL"))
 
@@ -734,6 +752,9 @@ def _route_exec(env: dict, session: str, task_id: Optional[str], local: bool, lo
     """``_route_backend`` for one browser_exec call; returns ``(error, runs on the local sidecar)``.
     A real-profile fallback is remembered per route: the route keeps its fresh browser and the note
     waits until a result carries it (``_take_real_profile_note``)."""
+    route_err = _resolve_fleet_broker(env, session)
+    if session.startswith("fb-"):
+        return route_err, False
     route_err = _route_backend(env, session, task_id, local, force_local_sidecar=local_sidecar,
                                real_profile=route_key not in _real_profile_fallback)
     note = env.pop(_REAL_PROFILE_FALLBACK_SENTINEL, None)

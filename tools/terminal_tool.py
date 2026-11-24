@@ -1521,13 +1521,17 @@ def _pre_exec_block(
     """Raise :class:`_Rejected` with the blocked-result JSON when the command must not run.
 
     Order matters: gateway lifecycle first (protects the running gateway),
-    then the dangerous-workdir check, then the self-repo guard (local only).
+    then the multiplex-profile path guard, then the dangerous-workdir check, then the self-repo guard (local only).
     """
     blocked = gateway_lifecycle_block(
         command=command, env=env, env_type=env_type, cwd=cwd, workdir=workdir, session_key=session_key,
     )
     if blocked:
         raise _Rejected(blocked)
+    from tools.profile_path_guard import check_command, check_path
+    profile_error = check_command(command) or (check_path(workdir) if workdir else None)
+    if profile_error:
+        raise _Rejected(_error_json(profile_error, status="blocked"))
     if workdir:
         workdir_error = _validate_workdir(workdir)
         if workdir_error:
@@ -1536,10 +1540,18 @@ def _pre_exec_block(
             raise _Rejected(_error_json(workdir_error, status="blocked"))
         _refuse_missing_local_workdir(workdir, env)
     if env_type == "local":
+        from tools.cli_mutation_guard import cli_mutation_block
+        cli_error = cli_mutation_block(command, cwd=workdir or cwd)
+        if cli_error:
+            raise _Rejected(_error_json(cli_error, status="blocked", retryable=False))
         blocked = (self_repo_block(command=command, cwd=cwd, workdir=workdir, session_key=session_key)
                    or locked_skill_block(command=command, cwd=cwd, workdir=workdir, session_key=session_key))
         if blocked:
             raise _Rejected(blocked)
+        from tools.terminal_heredoc_scratch_guard import reject_python_heredoc, require_scratch_py_compile
+        scratch_error = reject_python_heredoc(command) or require_scratch_py_compile(command)
+        if scratch_error:
+            raise _Rejected(_error_json(scratch_error, status="blocked", retryable=False))
 
 
 _PTY_DISABLED_REASON = (
@@ -1619,6 +1631,14 @@ def terminal_tool(
             # From here on this IS a background=true call for the stripped command: every guard
             # below (lifecycle, workdir, self-repo, dangerous-command approval) sees what runs.
             command, background = auto_bg, True
+        if not background:
+            from tools.terminal_timeout_retry import reject_unchanged_timeout
+            retry_error = reject_unchanged_timeout(
+                task_id=plan.effective_task_id, command=command,
+                workdir=workdir or plan.cwd or "", timeout=timeout, background=False,
+            )
+            if retry_error:
+                raise _Rejected(_error_json(retry_error, exit_code=124, status="blocked"))
         env = _acquire_env(plan, task_id)
         # _lookup_active_env stamps whichever of the two keys holds the env.
         from tools.environments.base import shell_state_scope
@@ -1695,12 +1715,18 @@ def terminal_tool(
                 if plan.promoted_from_foreground_timeout is not None:
                     result = _with_promoted_note(result, plan.promoted_from_foreground_timeout)
                 return _metered(None if _host_local else plan, result)
-            return _metered(None if _host_local else plan, _run_foreground(
+            result = _run_foreground(
                 command, env, plan,
                 task_id=task_id, session_id=session_id, session_key=session_key, cwd_key=cwd_key,
                 workdir=workdir, approval_note=verdict.note, clear_interrupt=verdict.approved_run,
                 metered=not _host_local,
-            ))
+            )
+            from tools.terminal_timeout_retry import record_outcome
+            record_outcome(
+                task_id=effective_task_id, command=command,
+                workdir=workdir or plan.cwd or "", timeout=timeout, result_json=result,
+            )
+            return _metered(None if _host_local else plan, result)
     except _Rejected as r:
         return r.result_json
     except EnvironmentConnectionError as e:

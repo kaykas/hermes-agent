@@ -1262,6 +1262,7 @@ def resolve_runtime_provider(*, requested: Optional[str] = None, explicit_api_ke
     _raise_if_local_alias_missing_endpoint(requested_provider, explicit_base_url)
     runtime = next(r for r in _ladder_rungs(requested_provider, explicit_api_key, explicit_base_url, target_model) if r)
     _raise_for_credentialless_bare_custom(requested_provider, runtime)
+    _raise_for_provider_tuple_mismatch(runtime, _get_model_config(), requested_alias, target_model)
     # model.openai_runtime is applied ONCE, after the ladder: every rung (pool, OAuth store,
     # explicit --api-key/--base-url, env key) hardcodes the wire api_mode for openai/openai-codex,
     # so applying the opt-in inside one rung left the others on codex_responses (#115169).
@@ -1296,6 +1297,19 @@ def _raise_for_credentialless_bare_custom(requested_provider: str, runtime: dict
         provider=requested_provider,
         code="missing_api_key",
     )
+
+
+def _raise_for_provider_tuple_mismatch(runtime: dict[str, Any], model_cfg: dict[str, Any], requested_alias: str,
+                                       target_model: Optional[str]) -> None:
+    """Refuse an undeliverable custom (base_url, model) tuple before dispatch
+    (:mod:`hermes_cli.runtime_provider_guard`). The model judged is ``target_model`` (sub-agents,
+    fallback entries, per-call overrides), else ``model.default`` but only when this resolution is
+    for the configured provider: a caller resolving another provider does not send that default."""
+    from hermes_cli.runtime_provider_guard import validate_provider_tuple
+    model = target_model
+    if not model and requested_alias in {"auto", _cfg_provider(model_cfg)}:
+        model = model_cfg.get("default")
+    validate_provider_tuple(runtime.get("provider"), runtime.get("base_url"), model)
 
 
 def _ladder_rungs(requested_provider, explicit_api_key, explicit_base_url, target_model):

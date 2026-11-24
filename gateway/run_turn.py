@@ -1578,10 +1578,16 @@ class GatewayTurnMixin(GatewayBackgroundMixin, GatewayTurnPrepareMixin, GatewayT
             _sc, first_response, previewed=bool(_delivery_result.get("response_previewed")),
         )
         # Same silence predicate as the normal path, else this branch leaks the literal marker.
+        # Multi-bot summons and bot peers may intentionally end in silence here too; this queued
+        # delivery branch must not reintroduce the warning that normal completion suppresses.
+        _silence_reply_expected = turn_ctx.reply_expected
+        if (not automatic_notices_allowed(turn_ctx.source)
+                or getattr(turn_ctx.source, "multi_bot_mentioned", False)):
+            _silence_reply_expected = False
         _silent = False
         if self._is_intentional_silence(_delivery_result, first_response):
             _silent = self._silence_allowed_for_source(
-                turn_ctx.source, turn_ctx.persist_user_display_kind, turn_ctx.reply_expected, _delivery_result)
+                turn_ctx.source, turn_ctx.persist_user_display_kind, _silence_reply_expected, _delivery_result)
             if _silent:
                 logger.info(
                     "Queued follow-up for session %s: suppressing intentional silence marker before continuing.",

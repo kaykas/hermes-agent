@@ -326,7 +326,9 @@ class ClientLifecycleMixin:
         logger.warning(
             "Detected closed shared OpenAI client; recreated before use (%s) %s", reason, self._client_log_context(),
         )
-        self._close_openai_client(client, reason=f"replace:{reason}", shared=True)
+        # Another turn may still be streaming on the replaced shared client. Shut down its
+        # sockets without releasing the underlying FDs until every borrower has unwound.
+        self._retire_shared_openai_client(client, reason=f"replace:{reason}")
         return new_client
 
     @staticmethod

@@ -131,6 +131,36 @@ def test_consecutive_user_messages_merge_for_gemini_alternation():
     assert roles == ["user", "model"], roles
 
 
+def test_leading_model_function_call_turn_gets_user_placeholder_for_gemini_alternation():
+    """When a compacted or trimmed transcript starts on an assistant tool-call
+    turn (no preceding user turn), Gemini rejects the request with HTTP 400
+    INVALID_ARGUMENT ("Please ensure that function call turn comes immediately
+    after a user turn or after a function response turn"). _merge_alternating
+    must prepend a synthetic user placeholder turn so contents[0] is user.
+    """
+    from agent.gemini_native_adapter import _build_gemini_contents
+
+    messages = [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "read_file", "arguments": '{"path": "a.txt"}'},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_1", "name": "read_file", "content": "ok"},
+        {"role": "user", "content": "next"},
+    ]
+    contents, _ = _build_gemini_contents(messages, include_tool_call_ids=True, is_gemini3=True)
+    roles = [c["role"] for c in contents]
+    assert roles[0] == "user", roles
+    assert "functionCall" in contents[1]["parts"][0], contents[1]
+
+
 def test_schema_bearing_tool_result_is_wrapped_as_opaque_text():
     """A tool result whose content is itself a JSON Schema must not be
     forwarded as a structured functionResponse.response.

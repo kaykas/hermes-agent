@@ -1705,6 +1705,9 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
                 error=(f"Invalid file search order {order!r}; expected "
                        "'discovery' or 'modified'."))
         path = self._expand_path(path)
+        rejected = self._preflight_validate_search(pattern, path, target, file_glob, order)
+        if rejected is not None:
+            return rejected
         probe = self._path_exists_probe(path)
         exists_probe = probe.stdout
         if probe.cwd_error:

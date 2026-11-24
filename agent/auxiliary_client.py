@@ -4400,6 +4400,14 @@ def _try_main_provider_route(
     elif runtime_api_key:
         # Pin aux to the main session's working key, not a re-selected (maybe exhausted) pool key.
         explicit_api_key = runtime_api_key
+    # A mismatched configured default must not build a client against the custom endpoint.
+    # Returning None hands the task to the verified auxiliary/fallback chain with its own tuple.
+    from hermes_cli.runtime_provider_guard import ProviderTupleMismatch, validate_provider_tuple
+    try:
+        validate_provider_tuple(resolved_provider, explicit_base_url, main_model)
+    except ProviderTupleMismatch as exc:
+        logger.warning("Auxiliary main route rejected before dispatch: %s", exc)
+        return None
     # Skip if the main provider was recently 402'd (unhealthy TTL bounds the bypass).
     main_chain_label = _normalize_chain_label(resolved_provider)
     if main_chain_label and _is_provider_unhealthy(main_chain_label, health_base_url):
