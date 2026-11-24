@@ -198,7 +198,7 @@ from hermes_cli._launchers import ensure_install_launchers
 lock = Lockfile(root / 'pm/lock.json')
 lock.set_pin('node', 'fixture', {})
 lock.save()
-for name, executable in [('python', Path(sys.executable)), ('node', node)]:
+for name, executable in [('python', Path(getattr(sys, '_base_executable', sys.executable)).resolve()), ('node', node)]:
     binary = store / name / 'bin' / ('python3' if name == 'python' else name)
     binary.parent.mkdir(parents=True)
     binary.symlink_to(executable)

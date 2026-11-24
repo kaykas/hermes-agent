@@ -54,9 +54,10 @@ function pinnedPnpm(source) {
 // project, and every entry of every virtual-store slot (the package itself plus links
 // to its dependencies, so a removed slot shows up as a dangling link). Optional
 // dependencies are skipped on hosts they do not support.
-function linkedPackageDirs(source, installedLock) {
+function linkedPackageDirs(source, importers, selected) {
   const dirs = []
-  for (const [project, fields] of Object.entries(lockImporters(readFileSync(installedLock, 'utf8')))) {
+  for (const project of ['.', ...selected]) {
+    const fields = importers[project]
     for (const name of Object.keys({ ...fields.dependencies, ...fields.devDependencies })) {
       dirs.push(join(source, project, 'node_modules', name))
     }
@@ -77,7 +78,7 @@ function linkedPackageDirs(source, installedLock) {
   return dirs
 }
 
-function completedInstallMatches({ source, receipt, installedLock, key, nativeKey }) {
+function completedInstallMatches({ source, receipt, installedLock, key, nativeKey, selected }) {
   if (!existsSync(receipt) || !existsSync(installedLock)) return false
   const expected = `${key}\n${createHash('sha256').update(readFileSync(installedLock)).digest('hex')}\n`
   if (nativeKey !== undefined) {
@@ -87,8 +88,10 @@ function completedInstallMatches({ source, receipt, installedLock, key, nativeKe
   // Probe each installed package's manifest, not its directory: a partial cleanup
   // or snapshot restore can leave gutted directories behind, and product builders
   // resolve tools through these manifests (#128935).
+  const importers = lockImporters(readFileSync(installedLock, 'utf8'))
+  if (['.', ...selected].some(project => !importers[project])) return false
   return readFileSync(receipt, 'utf8') === expected
-    && linkedPackageDirs(source, installedLock).every(dir => existsSync(join(dir, 'package.json')))
+    && linkedPackageDirs(source, importers, selected).every(dir => existsSync(join(dir, 'package.json')))
 }
 
 // The reuse check reads the trees: an error from a run that lost its lock meanwhile (the new owner
@@ -280,7 +283,7 @@ export function prepareNodeDependencies({ source, workspaces, env = process.env,
     selected = inputs.selected
     const previous = previousTrees(source, lock.check)
     previous.recover()
-    if (reuse && reusable(lock, { source, receipt, installedLock, key, nativeKey })) {
+    if (reuse && reusable(lock, { source, receipt, installedLock, key, nativeKey, selected })) {
       lock.check()
       if (prepareElectron) prepareElectronRuntime({ source, install, env, run: lock.run })
       console.log(`node-deps: reusing completed install (${selected.join(', ')})`)

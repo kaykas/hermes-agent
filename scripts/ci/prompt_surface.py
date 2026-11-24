@@ -82,11 +82,16 @@ def _pin_environment() -> None:
     socket.getaddrinfo = refuse  # type: ignore[assignment]
     # Third-party packages pick a native backend at import time from ``sys.platform``
     # (psutil loads ``_pslinux`` and its POSIX-only imports); load them for the real host first.
+    # CPython's lazy sysconfigdata must also resolve for the real host before the Linux pin.
     import psutil
+    import sysconfig
+    sysconfig.get_config_vars()
+    import platform as platform_module
     sys.platform = "linux"  # skills index ``platforms:`` gate
+    platform_module.system = lambda: "Linux"
 
     import hermes_time
-    hermes_time.now = lambda: FIXED_NOW  # type: ignore[assignment]
+    hermes_time.now = lambda: FIXED_NOW  # type: ignore[method-assign]
     # Every registered tool counts as available, as on a fully configured install: check_fns
     # read credentials, binaries and the tool store, which vary by host and would hide schemas.
     import tools.registry as registry_module
@@ -121,11 +126,20 @@ class _ImportFailures(logging.Handler):
 
 def _scrub(text: str, home: Path) -> str:
     import platform as _platform
-    for raw, token in sorted({
+    # ``home`` is resolved, but prompt builders also read the raw HOME env var.
+    # On macOS /var symlinks to /private/var, so scrub both spellings.
+    raw_home = os.environ.get("HOME", "")
+    raw_hermes_home = os.environ.get("HERMES_HOME", "")
+    tokens = {
         str(home / ".hermes"): "<HERMES_HOME>",
         str(home): "<HOME>",
         f"{_platform.system()} ({_platform.release()})": "<HOST_OS>",
-    }.items(), key=lambda kv: -len(kv[0])):
+    }
+    if raw_home:
+        tokens[raw_home] = "<HOME>"
+    if raw_hermes_home:
+        tokens[raw_hermes_home] = "<HERMES_HOME>"
+    for raw, token in sorted(tokens.items(), key=lambda kv: -len(kv[0])):
         text = text.replace(raw, token)
     # A scrubbed path's tail uses the host separator; render it POSIX so every host matches.
     return re.sub(r"<(?:HERMES_HOME|HOME)>[^\s\"'`]*", lambda m: m.group(0).replace("\\", "/"), text)

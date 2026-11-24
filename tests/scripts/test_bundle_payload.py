@@ -94,7 +94,7 @@ def test_both_launchers_keep_active_home_and_call_declared_function(tmp_path, ta
     root = tmp_path / "payload with spaces"
     (root / "bin").mkdir(parents=True)
     (root / "app").mkdir()
-    (root / "python").symlink_to(sys.executable)
+    (root / "python").symlink_to(Path(getattr(sys, "_base_executable", sys.executable)).resolve())
     (root / "app/entry.py").write_text("import json,os,sys\ndef run():\n print(json.dumps([os.environ['HERMES_HOME'],sys.argv[1:]])); return 7\n", encoding="utf-8")
     launcher = root / "bin/custom"
     launcher.write_text(posix_launcher("custom", "entry:run", python="python", repo="app", site="deps", target=target), encoding="utf-8")
@@ -110,7 +110,7 @@ def test_launcher_runs_a_named_module_like_the_store_launcher(tmp_path):
     root = tmp_path / "payload with spaces"
     (root / "bin").mkdir(parents=True)
     (root / "app").mkdir()
-    (root / "python").symlink_to(sys.executable)
+    (root / "python").symlink_to(Path(getattr(sys, "_base_executable", sys.executable)).resolve())
     (root / "app/entry.py").write_text("def run():\n print('entry point'); return 3\n", encoding="utf-8")
     (root / "app/probe.py").write_text("import json, sys\nprint(json.dumps([__name__, sys.argv[1:]])); sys.exit(7)\n",
                                        encoding="utf-8")

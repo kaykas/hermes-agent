@@ -7,7 +7,7 @@ import subprocess
 
 import pytest
 from hermes_cli import main_tui_launch
-from tests.hermes_cli.test_source_build import source_checkout, source_products, _events
+from tests.hermes_cli.test_source_build import source_checkout, source_products, _events, _host_pnpm_12
 
 
 def _touch_tui_entry(root: Path) -> None:
@@ -298,6 +298,8 @@ def test_prebuilt_bundle_launch_does_not_touch_missing_source(tmp_path, monkeypa
 @pytest.mark.parametrize("local_tsx", [False, True])
 def test_dev_launch_builds_ink_before_running_source(tui_source, local_tsx):
     root, acquired = tui_source
+    pnpm = _host_pnpm_12()
+    assert pnpm
     ink = root / "ui-tui/packages/hermes-ink"
     ink.mkdir(parents=True)
     (ink / "package.json").write_text(json.dumps({
@@ -306,7 +308,7 @@ def test_dev_launch_builds_ink_before_running_source(tui_source, local_tsx):
     (ink / "build.mjs").write_text("import { writeFileSync } from 'node:fs'; writeFileSync('built', 'ink');")
     workspace = root / "pnpm-workspace.yaml"
     workspace.write_text(workspace.read_text() + "  - ui-tui/packages/hermes-ink\n")
-    subprocess.run([shutil.which("pnpm"), "install", "--lockfile-only", "--ignore-scripts", "--offline"], cwd=root, check=True,
+    subprocess.run([pnpm, "install", "--lockfile-only", "--ignore-scripts", "--offline"], cwd=root, check=True,
                    env={**os.environ, **{f"pnpm_config_{name}_dir": str(root.parent / "pnpm" / name)
                                          for name in ("store", "cache", "state")}})
     tsx = root / "ui-tui/node_modules/.bin/tsx"
@@ -317,7 +319,7 @@ def test_dev_launch_builds_ink_before_running_source(tui_source, local_tsx):
                         "writeFileSync('ui-tui/node_modules/.bin/tsx', 'fixture tsx');\n")
     argv, cwd = main_tui_launch._make_tui_argv(root / "ui-tui", tui_dev=True)
     assert (ink / "built").read_text() == "ink"
-    assert argv == ([str(tsx), "src/entry.tsx"] if local_tsx else [shutil.which("pnpm"), "start"])
+    assert argv == ([str(tsx), "src/entry.tsx"] if local_tsx else [pnpm, "start"])
     assert cwd == root / "ui-tui"
     assert acquired == ["pnpm"]
     assert [event["step"] for event in _events(root)] == ["deps"]

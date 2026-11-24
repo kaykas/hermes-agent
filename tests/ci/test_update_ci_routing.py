@@ -575,7 +575,7 @@ def test_replay_python3_is_the_replay_interpreter_when_its_dir_has_only_python(t
     """A Windows venv dir holds only ``python``: python3 must not fall through to a host interpreter."""
     interpreter = tmp_path / "Scripts" / "python"
     interpreter.parent.mkdir()
-    interpreter.symlink_to(os.path.realpath(sys.executable))
+    interpreter.symlink_to(Path(getattr(sys, "_base_executable", sys.executable)).resolve())
     probe = ("import json, sys; from tests.ci import workflow_steps; "
              "print(json.dumps([sys.executable, workflow_steps.outputs(json.loads(sys.argv[1]), {})]))")
     env = {**os.environ, "PYTHONPATH": str(_REPO)}
