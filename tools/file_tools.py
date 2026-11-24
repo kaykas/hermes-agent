@@ -1126,7 +1126,7 @@ def search_tool(pattern: str, target: str = "content", path: str = ".",
                 "last_key": None, "consecutive": 0, "read_history": set()})
             _search_guard.start_search_streak(task_data)
             count = _bump_consecutive(task_data, search_key)
-            retries = _search_guard.retry_count(task_data, pattern, target)
+            retries = _search_guard.retry_count(task_data, pattern, target, order, limit, offset)
 
         if count >= 4:
             return tool_error(
@@ -1165,7 +1165,7 @@ def search_tool(pattern: str, target: str = "content", path: str = ".",
         cached_search_nf = _check_not_found_cache("search", resolved_search_path, task_id)
         if cached_search_nf is not None:
             with _read_tracker_lock:
-                _search_guard.record_search_outcome(task_data, pattern, target, False)
+                _search_guard.record_search_outcome(task_data, pattern, target, False, order, limit, offset)
             return cached_search_nf
 
         result = _get_file_ops(task_id).search(
@@ -1173,8 +1173,7 @@ def search_tool(pattern: str, target: str = "content", path: str = ".",
             limit=limit, offset=offset, output_mode=output_mode, context=context, order=order)
         with _read_tracker_lock:
             _search_guard.record_search_outcome(
-                task_data, pattern, target,
-                _search_guard.is_productive(result))
+                task_data, pattern, target, _search_guard.is_productive(result), order, limit, offset)
         omitted = _filter_read_blocked_search_results(result, task_id)
         for m in getattr(result, "matches", None) or ():
             if getattr(m, "content", None):

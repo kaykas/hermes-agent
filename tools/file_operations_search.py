@@ -928,7 +928,7 @@ class SearchMixin:
             # Single-level listing of the parent: a capped head would hide the
             # very entry being looked for in a large directory.
             ls_result = self._exec(
-                f"ls -1A {self._escape_shell_arg(parent)} 2>/dev/null | head -{self._PARENT_LISTING_CAP}")
+                f"ls -1A -- {self._escape_shell_arg(parent)} 2>/dev/null | head -{self._PARENT_LISTING_CAP}")
             entries = [e for e in ls_result.stdout.strip().split('\n') if e] if ls_result.exit_code == 0 else []
             lq = basename_query.lower()
             candidates = [
