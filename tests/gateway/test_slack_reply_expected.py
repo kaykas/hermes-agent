@@ -26,7 +26,7 @@ def _message(text, ts, **extra):
     ({}, _message("hi", "1.1", channel="D0001", channel_type="im"), True),
     ({}, _message(f"<@{BOT_USER_ID}> hi", "1.2"), True),
     ({}, _message("reaction:added:eyes", "1.3", thread_ts=THREAD, _hermes_force_process=True), True),
-    ({}, _message("done?", "1.4", thread_ts=THREAD), False),
+    ({}, _message("done?", "1.4", thread_ts=THREAD), None),
     ({}, _message(f"<@{OTHER_USER_ID}> can you check?", "1.5", thread_ts=THREAD), False),
     ({"free_response_channels": CHANNEL_ID}, _message("side chatter", "1.6"), False),
     ({"free_response_channels": CHANNEL_ID, "reply_in_thread": False}, _message("any update?", "1.7"), None),
@@ -41,13 +41,14 @@ def _message(text, ts, **extra):
     ({"free_response_channels": "C0CGT5C0WG7"},
      _message("<@U0BSHRLESQ4> please help with the league", "1.14",
               channel="C0CGT5C0WG7", channel_type="mpim"), False),
-    ({}, _message("done?", "1.16", channel="C0CGT5C0WG7", channel_type="mpim",
-                  thread_ts=THREAD), False),
+    ({"thread_followup_silence": True},
+     _message("done?", "1.16", channel="C0CGT5C0WG7", channel_type="mpim",
+              thread_ts=THREAD), False),
 ], ids=["dm", "mention", "reaction", "thread-followup", "peer-addressed", "free-channel-top-level",
         "flat-channel-followup", "peer-led-but-mentions-bot", "thread-followup-silence-on",
         "thread-followup-silence-off", "thread-followup-silence-on-mention", "thread-followup-silence-on-dm",
         "thread-followup-silence-on-flat-channel", "single-target-top-level-mpim",
-        "unaddressed-mpim-thread-followup"])
+        "mpim-thread-followup-silence-on"])
 async def test_admitted_message_carries_whether_it_was_addressed(adapter, extra, event, expected):
     adapter.config.extra.update(extra)
     adapter._mentioned_threads.add(THREAD)

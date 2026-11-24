@@ -6666,11 +6666,10 @@ class SlackAdapter(SlackSocketLifecycleMixin, SlackVaultCodeMixin, BasePlatformA
         """``MessageEvent.reply_expected`` for an admitted message. False (a bare silence marker may
         stand) when it opens by @mentioning someone else, is an unaddressed message that a
         free-response channel admitted as the start of its own session (a new top-level thread),
-        or is an unaddressed non-DM thread follow-up. The fleet's thread-followup silence remains
-        the default; an explicit ``thread_followup_silence: false`` config/env value disables it.
-        A plain follow-up in a flat ``reply_in_thread: false`` channel remains None so the gateway
-        keeps its visible fallback. A multi-bot summons never requires a reply from every recipient:
-        any addressed or active peer may yield without the gateway's visible silence warning."""
+        or is an unaddressed non-DM thread follow-up with ``thread_followup_silence`` explicitly on.
+        Without that opt-in, a plain follow-up in a conversation the bot is part of remains None so
+        the gateway keeps its visible fallback. A multi-bot summons never requires a reply from every
+        recipient: any addressed or active peer may yield without the gateway's visible silence warning."""
         if self._multi_fleet_bot_mentioned(routing_text, bot_uid):
             return False
         self_uids = {u for u in (bot_uid, self._bot_user_id) if u}
@@ -6678,12 +6677,8 @@ class SlackAdapter(SlackSocketLifecycleMixin, SlackVaultCodeMixin, BasePlatformA
             return True
         if self._slack_message_addressed_to_other_user(routing_text, self_uids):
             return False
-        if channel_thread_followup:
-            configured = _extra_or_secret(
-                self.config.extra, "thread_followup_silence", "SLACK_THREAD_FOLLOWUP_SILENCE",
-                None, blank_is_unset=False)
-            if configured is None or self._slack_thread_followup_silence():
-                return False
+        if channel_thread_followup and self._slack_thread_followup_silence():
+            return False
         return False if opens_own_session and self._slack_is_free_channel(channel_id) else None
 
     def _slack_message_mentions_self(self, text: str, self_uids: set) -> bool:
