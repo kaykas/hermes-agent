@@ -146,7 +146,7 @@ def test_closed_shared_client_is_recreated_before_request(monkeypatch):
 
     assert result == {"ok": "fresh-request-client"}
     assert agent.client is replacement_shared
-    assert stale_shared.close_calls >= 1
+    assert stale_shared.close_calls == 0
     assert replacement_shared.close_calls == 0
     assert len(factory.calls) == 2
 
@@ -223,10 +223,32 @@ def test_streaming_call_recreates_closed_shared_client_before_request(monkeypatc
 
     assert response.choices[0].message.content == "Hello world"
     assert agent.client is replacement_shared
-    assert stale_shared.close_calls >= 1
+    assert stale_shared.close_calls == 0
     # The clean stream's wire client is cached for reuse across sequential
     # calls (not closed at request end); teardown really closes it.
     assert request_client.close_calls == 0
     agent._close_cached_request_openai_client(reason="agent_close")
     assert request_client.close_calls == 1
     assert len(factory.calls) == 2
+
+
+def test_ensure_primary_retires_replaced_shared_client_without_hard_close(monkeypatch):
+    stale_shared = FakeSharedClient(lambda **kwargs: None)
+    stale_shared._client.is_closed = True
+    replacement_shared = FakeSharedClient(lambda **kwargs: {"replacement": True})
+    monkeypatch.setattr("agent.process_bootstrap.OpenAI", OpenAIFactory([replacement_shared]))
+
+    agent = _build_agent(shared_client=stale_shared)
+    retired = []
+
+    def retire(client, *, reason):
+        retired.append((client, reason))
+
+    def forbidden_close(*args, **kwargs):
+        raise AssertionError("shared client was hard-closed during replacement")
+
+    agent._retire_shared_openai_client = retire
+    agent._close_openai_client = forbidden_close
+
+    assert agent._ensure_primary_openai_client(reason="test-429") is replacement_shared
+    assert retired == [(stale_shared, "replace:test-429")]

@@ -120,6 +120,40 @@ def _first_pattern_error(text: str, *pattern_sets) -> str:
     return ""
 
 
+def _scan_cron_lifecycle_prompt(prompt: str) -> str:
+    """Refuse in-gateway restart orchestration at job creation time.
+
+    A cron executing inside the target gateway registers as live work, so an
+    idle-safe restart can deadlock on its own scheduler. External controllers
+    remain available; cron jobs may only report their durable receipts.
+    """
+    if not prompt:
+        return ""
+    restart = re.search(
+        r'hermes\s+gateway\s+(?:restart|stop|uninstall)|'
+        r'(?:restart|stop|uninstall)(?:ing)?\s+(?:the\s+)?(?:hermes\s+)?gateway|'
+        r'gateway\s+(?:restart|stop|uninstall)|'
+        r'\brestart\s+(?:request|job|task|command|attempt|workflow|controller)',
+        prompt,
+        re.IGNORECASE,
+    )
+    if not restart:
+        return ""
+    reporting_only = re.search(
+        r'(?:report|read|inspect|verify|check)(?:ing)?\s+(?:the\s+)?'
+        r'(?:durable\s+)?(?:restart\s+)?receipt',
+        prompt,
+        re.IGNORECASE,
+    )
+    if reporting_only and not re.search(r'(?:run|execute|perform|schedule|queue|request|initiate)(?:ing)?[^.\n]{0,60}(?:restart|stop|uninstall)', prompt, re.IGNORECASE):
+        return ""
+    return (
+        "Blocked: an in-gateway cron cannot restart, stop, or uninstall the "
+        "gateway it runs inside. Use an external controller with a durable "
+        "receipt; cron may only read and report that receipt."
+    )
+
+
 def _scan_cron_prompt(prompt: str) -> str:
     """Strict scan of the USER-SUPPLIED prompt (create/update + runtime defense-in-depth).
     Returns an error string when blocked, else "". Invisible unicode is reported first, in
@@ -128,7 +162,7 @@ def _scan_cron_prompt(prompt: str) -> str:
     for char in _CRON_INVISIBLE_CHARS:
         if f"U+{ord(char):04X}" in removed:
             return f"Blocked: prompt contains invisible unicode U+{ord(char):04X} (possible injection)."
-    return _first_pattern_error(prompt, _CRON_THREAT_PATTERNS, _CRON_EXFIL_COMMAND_PATTERNS)
+    return _scan_cron_lifecycle_prompt(prompt) or _first_pattern_error(prompt, _CRON_THREAT_PATTERNS, _CRON_EXFIL_COMMAND_PATTERNS)
 
 
 def _scan_cron_skill_assembled(assembled: str) -> tuple[str, str]:

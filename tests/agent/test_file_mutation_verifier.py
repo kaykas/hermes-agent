@@ -316,6 +316,30 @@ class TestVerifierEnabled:
         )
         assert agent._file_mutation_verifier_enabled() is False
 
+    def test_scratch_paths_are_ignored(self):
+        agent = _bare_agent()
+        agent._record_file_mutation_result(
+            "write_file",
+            {"path": "/Users/jkw/.hermes/profiles/nova2/cache/scratch/probe.py", "content": "x"},
+            json.dumps({"error": "Refusing to overwrite"}),
+            is_error=True,
+        )
+        assert getattr(agent, "_turn_failed_file_mutations") == {}
+
+    def test_messaging_platforms_suppress_footer(self):
+        import logging
+        from agent.turn_finalizer import _append_file_mutation_footer
+
+        agent = _bare_agent()
+        setattr(agent, "platform", "slack")
+        setattr(
+            agent,
+            "_turn_failed_file_mutations",
+            {"/tmp/a.md": {"tool": "patch", "error_preview": "Could not find old_string"}},
+        )
+        out = _append_file_mutation_footer(agent, "Clean answer.", logging.getLogger(__name__))
+        assert out == "Clean answer."
+
 # ---------------------------------------------------------------------------
 # Module-level invariants
 # ---------------------------------------------------------------------------

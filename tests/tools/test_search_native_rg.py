@@ -140,3 +140,39 @@ def test_local_search_runs_the_pinned_ripgrep_not_the_first_on_path(_local_env, 
                         lambda name: InstalledPackage(pinned.parent, "15", pinned) if name == "ripgrep" else None)
     ops = ShellFileOperations(_local_env, cwd=str(tmp_path))
     assert ops._resolve_command("rg") == str(pinned).replace("\\", "/")
+
+
+def test_native_runner_captures_process_group_identity(tree, ops_factory, monkeypatch):
+    """Native Popen must carry the same teardown identity as the shell spawner."""
+    import subprocess
+    from gateway import status
+
+    captured = []
+    real_popen = subprocess.Popen
+
+    def spy(*args, **kwargs):
+        proc = real_popen(*args, **kwargs)
+        captured.append(proc)
+        return proc
+
+    monkeypatch.setattr(subprocess, "Popen", spy)
+    monkeypatch.setattr(status, "get_process_start_time", lambda pid: 123456)
+    ops = ops_factory(tree, [])
+    result = ops._run_rg_native(["sh", "-c", "'printf needle'"], 5, timeout=5)
+    assert result.exit_code == 0 and result.stdout == "needle"
+    assert len(captured) == 1
+    assert isinstance(captured[0]._hermes_pgid, int)
+    assert captured[0]._hermes_pgid_start == 123456
+
+
+def test_dead_direct_popen_without_cached_group_is_normal_cleanup(monkeypatch):
+    """A short-lived rg can exit before the group probe; ESRCH is not a tool error."""
+    import os
+    from tools.environments.local import _kill_process_group_posix
+
+    class DeadProc:
+        pid = 999999
+        def poll(self): return 0
+
+    monkeypatch.setattr(os, "getpgid", lambda pid: (_ for _ in ()).throw(ProcessLookupError(3, "No such process")))
+    _kill_process_group_posix(DeadProc())  # must return without raising

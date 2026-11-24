@@ -80,6 +80,9 @@ class SessionSource:
     user_id_alt: Optional[str] = None  # platform-specific stable alt ID (Signal UUID, Feishu union_id)
     chat_id_alt: Optional[str] = None  # Signal group internal ID
     is_bot: bool = False  # message author is a bot/webhook (Discord)
+    # Adapter-verified human message mentioning this bot and at least one sibling fleet bot.
+    # Intentional silence is then valid: another mentioned agent may own the answer.
+    multi_bot_mentioned: bool = False
     # Platform-neutral SCOPE discriminator (Discord guild / Slack workspace / Matrix server) driving
     # isolation. ``guild_id`` is a deprecated alias: both written, ``scope_id`` wins on read.
     scope_id: Optional[str] = None
@@ -136,7 +139,7 @@ class SessionSource:
     _ALWAYS_FIELDS = ("chat_id", "chat_name", "chat_type", "user_id", "user_name", "thread_id", "chat_topic")
     _OPTIONAL_PRE_SCOPE = ("user_id_alt", "chat_id_alt")
     _OPTIONAL_POST_SCOPE = ("parent_chat_id", "message_id", "profile")
-    _OPTIONAL_TAIL = ("auto_thread_initial_name", "prospective_thread_id")
+    _OPTIONAL_TAIL = ("auto_thread_initial_name", "prospective_thread_id", "multi_bot_mentioned")
 
     def to_dict(self) -> dict[str, Any]:
         d = {"platform": self.platform.value}
@@ -165,13 +168,15 @@ class SessionSource:
             for name in cls._ALWAYS_FIELDS[1:] + cls._OPTIONAL_PRE_SCOPE + cls._OPTIONAL_POST_SCOPE + cls._OPTIONAL_TAIL
             if name != "chat_type"
         }
-        return cls(
+        source = cls(
             platform=Platform(data["platform"]), chat_id=str(data["chat_id"]),
             chat_type=data.get("chat_type", "dm"),
             scope_id=data.get("scope_id", data.get("guild_id")),
             auto_thread_created=bool(data.get("auto_thread_created", False)),
             shared_session=bool(data.get("shared_session", False)), **plain,
         )
+        source.multi_bot_mentioned = bool(data.get("multi_bot_mentioned", False))
+        return source
 
 
 @dataclass

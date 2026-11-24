@@ -10,12 +10,17 @@ stub) is released by that call (``release_replaced_skill_view``); a notice appen
 result keeps it.
 """
 
+import difflib
 import hashlib
 import json
 import threading
 
 _skill_view_tracker: dict[str, dict[tuple, tuple[str, str, int]]] = {}
 _skill_view_tracker_lock = threading.Lock()
+# Per-turn missing-slug inventory and responses. The first miss snapshots the
+# skills_list names once; later misses reuse that inventory, and an exact repeat
+# is refused before any filesystem/plugin lookup runs.
+_missing_skill_tracker: dict[str, dict] = {}
 _SKILL_VIEW_DEDUP_CAP = 200
 
 _SKILL_VIEW_DEDUP_MESSAGE = (
@@ -79,10 +84,47 @@ def release_replaced_skill_views(task_id, batch: list[dict], contents_before: li
             release_replaced_skill_view(task_id, message.get("tool_call_id"), message.get("content"))
 
 
+def repeated_missing_skill(task_id, name):
+    """Return the cached closest matches for an exact repeat miss, else None."""
+    if not task_id:
+        return None
+    with _skill_view_tracker_lock:
+        entry = _missing_skill_tracker.get(str(task_id), {}).get("misses", {}).get(name)
+        return list(entry) if entry is not None else None
+
+
+def record_missing_skill(task_id, name, inventory_provider):
+    """Cache one skills_list inventory per turn and return closest installed slugs.
+
+    ``inventory_provider`` runs only when this turn has no inventory yet. Exact
+    repeats are served by ``repeated_missing_skill`` before this function is reached.
+    """
+    inventory = None
+    if task_id:
+        with _skill_view_tracker_lock:
+            inventory = _missing_skill_tracker.get(str(task_id), {}).get("inventory")
+    if inventory is None:
+        inventory = sorted({str(item) for item in inventory_provider()})
+    suggestions = difflib.get_close_matches(name, inventory, n=5, cutoff=0.2)
+    if not suggestions:
+        lowered = name.lower()
+        suggestions = [item for item in inventory if lowered in item.lower()][:5]
+    if not suggestions:
+        suggestions = inventory[:5]
+    if task_id:
+        with _skill_view_tracker_lock:
+            entry = _missing_skill_tracker.setdefault(str(task_id), {})
+            entry.setdefault("inventory", inventory)
+            entry.setdefault("misses", {})[name] = list(suggestions)
+    return suggestions
+
+
 def reset_skill_view_dedup(task_id: str | None = None) -> None:
-    """Clear the dedup cache (all tasks when task_id is None); called on context compression."""
+    """Clear view and missing-slug caches (all tasks when task_id is None)."""
     with _skill_view_tracker_lock:
         if task_id is None:
             _skill_view_tracker.clear()
+            _missing_skill_tracker.clear()
         else:
             _skill_view_tracker.pop(str(task_id), None)
+            _missing_skill_tracker.pop(str(task_id), None)

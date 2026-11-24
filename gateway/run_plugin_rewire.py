@@ -115,7 +115,7 @@ def reload_plugins_verb(runner: Any, loop: asyncio.AbstractEventLoop) -> Callabl
             activations = activation_summaries(manager) + dependency_blocked_summaries(manager)
         _reconcile_plugin_mcp_servers(runner, requested)
         try:
-            rewired = asyncio.run_coroutine_threadsafe(_count_adapters(runner, profile_name), loop).result(timeout=5.0)
+            rewired = asyncio.run_coroutine_threadsafe(_rewire_and_count_adapters(runner, profile_name, requested if profile_name else None), loop).result(timeout=5.0)
         except Exception:
             rewired = None
         return {"reloaded": True, "home": str(requested), "plugins": names, "activations": activations,
@@ -159,8 +159,9 @@ def _reconcile_plugin_mcp_servers(runner: Any, home: Path) -> None:
     thread.join(timeout=_MCP_CONNECT_WAIT_S)
 
 
-async def _count_adapters(runner: Any, profile_name: Optional[str]) -> int:
-    """Live adapters for the profile; scheduled after the loaded-event callback, so they are re-wired."""
+async def _rewire_and_count_adapters(runner: Any, profile_name: Optional[str], profile_home: Optional[Path] = None) -> int:
+    """Ensure live adapters for the profile are re-wired even when reload-plugins reloaded an existing plugin in place."""
+    runner._rewire_plugin_handlers(profile_name, profile_home)
     if profile_name is None:
         return len(getattr(runner, "adapters", None) or {})
     return len((getattr(runner, "_profile_adapters", None) or {}).get(profile_name) or {})

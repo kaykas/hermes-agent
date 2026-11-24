@@ -1652,11 +1652,15 @@ class SlackAdapter(SlackSocketLifecycleMixin, SlackVaultCodeMixin, BasePlatformA
         self._app.command(_slash_pattern)(self._handle_hermes_command)
 
         # Approval buttons, slash-confirm buttons (tools/slash_confirm.py), feedback.
+        assert self._app is not None
         for _action_id in self._APPROVAL_CHOICES:
             self._app.action(_action_id)(self._handle_approval_action)
         for _action_id in self._CONFIRM_CHOICES:
             self._app.action(_action_id)(self._handle_slash_confirm_action)
         self._app.action("hermes_feedback")(self._handle_feedback_action)
+        # Operator-card HTTPS link buttons (json-render Slack Block Kit adapter):
+        # Slack still dispatches block_actions when a URL button is clicked.
+        self._app.action(re.compile(r"^operator\.link\.\d+$"))(self._handle_operator_link_action)
         # Clarify buttons (tools/clarify_gateway.py); indexed action IDs because
         # Block Kit requires unique IDs within an actions block.
         self._app.action(re.compile(r"^hermes_clarify_choice_\d+$"))(self._handle_clarify_action)
@@ -3309,6 +3313,31 @@ class SlackAdapter(SlackSocketLifecycleMixin, SlackVaultCodeMixin, BasePlatformA
             text = re.sub(rf"<@{uid}(?:\|[^>]*)?>", lambda _m, _name=f"@{display}": _name, text)
         return text
 
+    _FLEET_PEER_BOTS = (
+        ("Cedar", "U0BPART3D50"),
+        ("Nova Deux", "U0BSHRLESQ4"),
+        ("Heath", "U0BRJFJ4ZSP"),
+        ("Hendrick", "U0CEK70JRQ8"),
+        ("Halo", "U0C6BMP0DMW"),
+        ("Icculus", "U0BSDTPFXNW"),
+        ("Pippin", "U0BT1S9S0UU"),
+        ("Jeter", "U0CB77CQGDP"),
+        ("Mira", "U0AEBMTLNEP"),
+    )
+
+    @classmethod
+    def _multi_fleet_bot_mentioned(cls, routing_text: str, bot_uid: str | None) -> bool:
+        """True when one human summons names at least two fleet bots.
+
+        The receiving bot need not be named: an active third bot may admit the interrupt, then
+        correctly yield to the addressed peers without emitting a visible silence warning.
+        """
+        if not routing_text:
+            return False
+        mentioned = set(re.findall(r"<@([A-Z0-9]+)(?:\|[^>]*)?>", routing_text))
+        fleet_uids = {uid for _name, uid in cls._FLEET_PEER_BOTS} | ({bot_uid} if bot_uid else set())
+        return len(mentioned & fleet_uids) >= 2
+
     def _build_identity_prompt(self, team_id: str = "") -> str:
         """Ephemeral system-prompt line naming the bot's handle, injected via the per-turn
         ``channel_prompt`` seam (never persisted, so prompt caching holds): a "that's me" anchor."""
@@ -3316,6 +3345,11 @@ class SlackAdapter(SlackSocketLifecycleMixin, SlackVaultCodeMixin, BasePlatformA
             (team_id and self._team_bot_names.get(team_id)) or self._bot_display_name or "").strip()
         if not name:
             return ""
+        team_bot_user_ids = getattr(self, "_team_bot_user_ids", {})
+        self_uid = (team_id and team_bot_user_ids.get(team_id)) or getattr(self, "_bot_user_id", "") or ""
+        peers = ", ".join(
+            f"@{pname} (<@{puid}>)" for pname, puid in self._FLEET_PEER_BOTS if puid != self_uid
+        )
         return (
             f"You are connected to this Slack workspace as the bot "
             f'"@{name}". The adapter already applied mention and channel '
@@ -3325,7 +3359,17 @@ class SlackAdapter(SlackSocketLifecycleMixin, SlackVaultCodeMixin, BasePlatformA
             f'because "@{name}" is absent. In messages, each line is prefixed '
             f"with the sender's name, and visible mentions are shown as "
             f"@DisplayName; a mention of any other participant is not a "
-            f"mention of you, even if their name is similar.")
+            f"mention of you, even if their name is similar. "
+            f"Sibling fleet bots in this workspace/channel: {peers}. "
+            f"Their replies in shared threads appear in your [Thread context] — never claim a sibling "
+            f"bot is absent or invisible to you. If a human addresses only a sibling bot, respond with "
+            f"[SILENT] and let that bot answer. If a human co-mentions you and one or more siblings, "
+            f"the first named bot is the single human-facing voice: lead and consolidate the answer "
+            f"when that is you; otherwise respond with [SILENT] unless you own a distinct next action "
+            f"or must correct a material error. Do not post acknowledgments, standby notices, lane "
+            f"claims, or repeated status updates. To hand off work to a sibling bot in the thread, "
+            f"@mention their Slack tag once (e.g. <@SIBLING_BOT_ID>); when answering a sibling bot's "
+            f"@mention, reply directly and do NOT @mention them back.")
 
     async def _resolve_user_is_bot(
         self, user_id: str, chat_id: str = "", team_id: str = "") -> bool:
@@ -3612,11 +3656,50 @@ class SlackAdapter(SlackSocketLifecycleMixin, SlackVaultCodeMixin, BasePlatformA
         installs = getattr(self, "_team_clients", None) or {}
         return team_id if str(team_id) in installs else ""
 
-    def _is_foreign_author(self, author_team: str, resolved_team: str) -> bool:
-        """A ``T…`` author outside every authenticated workspace. A member of a sibling install
-        is not foreign: ``authorizations[0]`` may name another install of the same Grid org."""
-        return bool(author_team and resolved_team and author_team != resolved_team
-                    and not self._team_in_install_set(author_team))
+    def _is_home_channel_dm_principal(self, user_id: str = "", channel_id: str = "") -> bool:
+        """True when ``user_id`` or ``channel_id`` is this profile's configured Slack ``home_channel``
+        principal (or its ``SLACK_HOME_CHANNEL`` DM). A Slack Connect principal who owns the bot's
+        configured home DM must be able to use their own 1:1 DM."""
+        home = getattr(getattr(self, "config", None), "home_channel", None)
+        if home is not None:
+            home_uid = str(getattr(home, "user_id", "") or "").strip()
+            home_cid = str(getattr(home, "chat_id", "") or "").strip()
+            if (user_id and home_uid and str(user_id) == home_uid) or (
+                    channel_id and home_cid and str(channel_id) == home_cid):
+                return True
+        env_home = (_get_scoped_secret("SLACK_HOME_CHANNEL", "") or "").strip()
+        if channel_id and env_home and str(channel_id) == env_home:
+            return True
+        return False
+
+    def _is_foreign_author(
+        self, author_team: str, resolved_team: str, *, user_id: str = "", channel_id: str = ""
+    ) -> bool:
+        """A ``T…`` author outside every authenticated workspace (unless the sender/channel is the
+        profile's configured ``home_channel`` DM principal or an explicitly allowed Slack Connect
+        workspace in ``allowed_external_teams`` / ``SLACK_ALLOWED_EXTERNAL_TEAMS``). A member of a
+        sibling install is not foreign: ``authorizations[0]`` may name another install of the same
+        Grid org."""
+        if not (author_team and resolved_team and author_team != resolved_team):
+            return False
+        if self._team_in_install_set(author_team):
+            return False
+        uid = user_id
+        cid = channel_id
+        if not (uid or cid):
+            try:
+                caller = sys._getframe(1).f_locals
+                raw_ev = caller.get("event")
+                ev: dict = raw_ev if isinstance(raw_ev, dict) else {}
+                uid = str(caller.get("sharer_id") or ev.get("user") or "")
+                cid = str(ev.get("_hermes_reaction_source_channel") or caller.get("channel_id") or ev.get("channel") or "")
+            except Exception:
+                pass
+        if self._is_home_channel_dm_principal(user_id=uid, channel_id=cid):
+            return False
+        allowed_ext = self._extra_or_env_channel_set(
+            "allowed_external_teams", "SLACK_ALLOWED_EXTERNAL_TEAMS")
+        return str(author_team) not in allowed_ext
 
     @staticmethod
     def _context_channel_id(context: Any) -> str:
@@ -4083,7 +4166,8 @@ class SlackAdapter(SlackSocketLifecycleMixin, SlackVaultCodeMixin, BasePlatformA
                 sender_team = next((
                     v for v in (event.get("team"), file_obj.get("user_team"))
                     if isinstance(v, str) and v.startswith("T")), "")
-            if self._is_foreign_author(sender_team, team_id):
+            if self._is_foreign_author(
+                    sender_team, team_id, user_id=str(sharer_id or ""), channel_id=str(channel_id or "")):
                 logger.info(
                     "[Slack] Ignoring file share DM from external-org user %s (team %s) in %s",
                     sharer_id, sender_team, channel_id)
@@ -4257,6 +4341,7 @@ class SlackAdapter(SlackSocketLifecycleMixin, SlackVaultCodeMixin, BasePlatformA
             self._slack_ignore_other_user_mentions() and not is_mentioned
             and not self._slack_message_mentions_self(routing_text, self_uids)
             and self._slack_message_addressed_to_other_user(routing_text, self_uids)):
+            self._invalidate_thread_rehydration(channel_id, event_thread_ts, team_id)
             logger.debug(
                 "[Slack] Ignoring message addressed to another user in channel %s", channel_id)
             return False
@@ -4503,26 +4588,31 @@ class SlackAdapter(SlackSocketLifecycleMixin, SlackVaultCodeMixin, BasePlatformA
                     "so a retry or edit can re-drive the turn", self.name, _ts)
             raise
 
-    async def _drop_bot_sender(self, event: dict) -> bool:
+    async def _drop_bot_sender(self, event: dict, team_id: Optional[str] = None) -> bool:
         """allow_bots gate: ``none`` drops all bot posts (default), ``mentions`` those not
         @mentioning us, ``all`` accepts — own posts always drop (echo loops). Unlabeled events
         without ``client_msg_id`` are probed via users.info (humans carry it, stray bots don't)."""
+        resolved_team_id = team_id if team_id is not None else str(event.get("team") or event.get("team_id") or "")
         msg_user = event.get("user", "")
         sender_is_bot = self._event_declares_bot_sender(event)
         if not sender_is_bot and msg_user and not event.get("client_msg_id"):
             sender_is_bot = await self._resolve_user_is_bot(
                 msg_user, chat_id=event.get("channel", ""),
-                team_id=str(event.get("team") or event.get("team_id") or ""))
+                team_id=resolved_team_id)
         if not sender_is_bot:
             return False
         allow_bots = self._slack_allow_bots()
         if allow_bots == "none":
+            self._invalidate_thread_rehydration(
+                event.get("channel", ""), event.get("thread_ts"), resolved_team_id)
             return True
         if allow_bots == "mentions":
             # Mentions may live only in Block Kit, not the flat text.
             # See #52387.
             text_check = _slack_mention_detection_text(event)
             if self._bot_user_id and f"<@{self._bot_user_id}>" not in text_check:
+                self._invalidate_thread_rehydration(
+                    event.get("channel", ""), event.get("thread_ts"), resolved_team_id)
                 logger.debug(
                     "[Slack] Dropping bot message under allow_bots=mentions: "
                     "no <@%s> mention in flat text or blocks", self._bot_user_id)
@@ -4583,12 +4673,15 @@ class SlackAdapter(SlackSocketLifecycleMixin, SlackVaultCodeMixin, BasePlatformA
         is_dm_event = (
             event.get("channel_type") == "im" or str(channel_id).startswith("D")
             or str(event.get("_hermes_reaction_source_channel", "")).startswith("D"))
-        if is_dm_event and self._is_foreign_author(author_team, dedup_team_id):
+        if is_dm_event and self._is_foreign_author(
+                author_team, dedup_team_id,
+                user_id=str(event.get("user") or ""),
+                channel_id=str(event.get("_hermes_reaction_source_channel") or channel_id or "")):
             logger.info(
                 "[Slack] Ignoring DM from external-org user %s (team %s) in %s",
                 event.get("user"), author_team, channel_id)
             return None
-        if await self._drop_bot_sender(event):
+        if await self._drop_bot_sender(event, team_id=dedup_team_id):
             return None
         # Edits were normalized above so an @mention added by edit can wake the bot once;
         # the normalized event retains the edited message's own subtype.
@@ -4630,7 +4723,10 @@ class SlackAdapter(SlackSocketLifecycleMixin, SlackVaultCodeMixin, BasePlatformA
         if not sender_is_bot_user:
             return False
         allow_bots = self._slack_allow_bots()
-        return allow_bots == "none" or (allow_bots == "mentions" and not is_mentioned)
+        dropped = allow_bots == "none" or (allow_bots == "mentions" and not is_mentioned)
+        if dropped:
+            self._invalidate_thread_rehydration(channel_id, event.get("thread_ts"), team_id)
+        return dropped
 
     def _apply_bot_mention(
         self, text: str, original_text: str, command_probe_text: str, is_command_text: bool,
@@ -4771,9 +4867,10 @@ class SlackAdapter(SlackSocketLifecycleMixin, SlackVaultCodeMixin, BasePlatformA
             is_command_text=is_command_text, channel_id=channel_id, team_id=team_id, ts=ts,
             user_id=user_id, thread_ts=thread_ts, is_dm=is_dm, media_urls=media_urls,
             media_types=media_types, media_text_inlined=media_text_inlined, channel_context=channel_context,
+            multi_bot_mentioned=self._multi_fleet_bot_mentioned(routing_text, bot_uid),
             reply_expected=self._slack_reply_expected(
                 routing_text, bot_uid, channel_id=channel_id, opens_own_session=thread_ts == ts,
-                channel_thread_followup=is_thread_reply and not is_dm,
+                channel_thread_followup=is_thread_reply and not is_one_to_one_dm,
                 addressed=is_one_to_one_dm or is_mentioned or is_command_text or force_process))
         # React only when directly addressed; MPIMs are shared, so they need a
         # mention like any channel.
@@ -4794,7 +4891,8 @@ class SlackAdapter(SlackSocketLifecycleMixin, SlackVaultCodeMixin, BasePlatformA
         self, event: dict, *, text: str, original_text: str, command_probe_text: str,
         is_command_text: bool, channel_id: str, team_id: str, ts: str, user_id: str,
         thread_ts: Optional[str], is_dm: bool, media_urls: list[str], media_types: list[str],
-        media_text_inlined: list[bool], channel_context: Optional[str], reply_expected: Optional[bool] = None) -> MessageEvent:
+        media_text_inlined: list[bool], channel_context: Optional[str],
+        multi_bot_mentioned: bool = False, reply_expected: Optional[bool] = None) -> MessageEvent:
         """Resolve names, title the DM thread, and build the ``MessageEvent``. Commands are restored
         from canonical input: the parser needs the token at char zero and enrichment (blocks,
         unfurls, file text, history) must never mutate arguments."""
@@ -4820,7 +4918,8 @@ class SlackAdapter(SlackSocketLifecycleMixin, SlackVaultCodeMixin, BasePlatformA
             # bot known only via users.info (no bot_id/subtype) is a bot here too, or it would reach
             # the gateway as a person and escape the bot loop guard. Cached by _peer_bot_drop.
             is_bot=self._event_declares_bot_sender(event) or await self._resolve_user_is_bot(
-                user_id, chat_id=channel_id, team_id=team_id))
+                user_id, chat_id=channel_id, team_id=team_id),
+            multi_bot_mentioned=multi_bot_mentioned)
         source.shared_session = event.get("channel_type") == "mpim"  # a group DM keys "dm" but is shared
         from gateway.platforms.base import resolve_channel_skills
         # Remaining ``<@UID>`` are OTHER participants (own mention stripped
@@ -5728,14 +5827,30 @@ class SlackAdapter(SlackSocketLifecycleMixin, SlackVaultCodeMixin, BasePlatformA
                 channel=channel_id, user=user_id, text=refusal_text(requester), thread_ts=(body.get("message") or {}).get("thread_ts"))
         return bool(requester)
 
+    async def _handle_operator_link_action(self, ack, body, action) -> None:
+        """Ack json-render operator card URL link button clicks so Slack does not show a warning."""
+        await ack()
+        action_id = str((action or {}).get("action_id") or "")
+        message = (body or {}).get("message", {}) or {}
+        channel_id = ((body or {}).get("channel") or {}).get("id", "")
+        user_id = ((body or {}).get("user") or {}).get("id", "")
+        logger.debug(
+            "[Slack] Operator link button clicked: action_id=%s user=%s channel=%s ts=%s",
+            action_id, user_id, channel_id, message.get("ts", ""))
+
     async def _handle_approval_action(self, ack, body, action) -> None:
         """Handle an approval button click from Block Kit."""
         if (started := await self._begin_interaction(ack, body, action, "approval")) is None:
             return
         team_id, action_id, session_key, message, msg_ts, channel_id, user_name, user_id = started
         choice = self._APPROVAL_CHOICES.get(action_id, "deny")
-        # The bare ts too: stored without a team id, clicked with one.
+        # Accept the bare ts and cross-team markers used by Slack Connect clicks.
         approval_key = msg_ts if msg_ts in self._approval_resolved else self._workspace_message_marker(team_id, msg_ts)
+        if approval_key not in self._approval_resolved:
+            for k in list(self._approval_resolved):
+                if isinstance(k, tuple) and len(k) == 2 and k[1] == msg_ts:
+                    approval_key = k
+                    break
         if await self._refuse_other_requester(approval_refusal(
                 session_key, user_id, extra=self.config.extra, request_id=self._approval_request_ids.get(approval_key),
                 choice=choice), body):
@@ -6316,6 +6431,22 @@ class SlackAdapter(SlackSocketLifecycleMixin, SlackVaultCodeMixin, BasePlatformA
             self._thread_rehydration_checked, self._THREAD_REHYDRATION_CHECKED_MAX,
             lambda e: e.split(":")[2] if e.count(":") >= 2 else "")
 
+    def _invalidate_thread_rehydration(
+        self, channel_id: str, thread_ts: Optional[str], team_id: str = ""
+    ) -> None:
+        """Mark a thread dirty when a peer-bot or other-user-addressed reply is skipped so the
+        next turn in this thread fetches the delta past ``watermark_ts`` into ``channel_context``."""
+        if not channel_id or not thread_ts:
+            return
+        prefix = f"{team_id}:{channel_id}:{thread_ts}"
+        checked = getattr(self, "_thread_rehydration_checked", None)
+        if checked:
+            for k in [k for k in list(checked) if k == prefix or k.startswith(prefix + ":")]:
+                checked.discard(k)
+        cache = getattr(self, "_thread_context_cache", None)
+        if cache:
+            cache.pop(self._thread_cache_key(channel_id, str(thread_ts), team_id), None)
+
     def _thread_watermark_io(
         self, method: str, channel_id: str, thread_ts: str, user_id: str, team_id: str, *args: Any
     ) -> Any:
@@ -6533,19 +6664,26 @@ class SlackAdapter(SlackSocketLifecycleMixin, SlackVaultCodeMixin, BasePlatformA
         self, routing_text: str, bot_uid: Optional[str], *, channel_id: str, addressed: bool,
         opens_own_session: bool, channel_thread_followup: bool = False) -> Optional[bool]:
         """``MessageEvent.reply_expected`` for an admitted message. False (a bare silence marker may
-        stand) only when it opens by @mentioning someone else, or is an unaddressed message that a
-        free-response channel admitted as the start of its own session (a new top-level thread).
-        A plain follow-up in a conversation the bot is part of (a thread, or a flat
-        ``reply_in_thread: false`` channel) is None: it is usually meant for the bot, so the
-        gateway keeps its visible fallback (#110952). With ``thread_followup_silence`` on, an
-        unaddressed reply in a non-DM Slack thread (``channel_thread_followup``) is False instead."""
+        stand) when it opens by @mentioning someone else, is an unaddressed message that a
+        free-response channel admitted as the start of its own session (a new top-level thread),
+        or is an unaddressed non-DM thread follow-up. The fleet's thread-followup silence remains
+        the default; an explicit ``thread_followup_silence: false`` config/env value disables it.
+        A plain follow-up in a flat ``reply_in_thread: false`` channel remains None so the gateway
+        keeps its visible fallback. A multi-bot summons never requires a reply from every recipient:
+        any addressed or active peer may yield without the gateway's visible silence warning."""
+        if self._multi_fleet_bot_mentioned(routing_text, bot_uid):
+            return False
         self_uids = {u for u in (bot_uid, self._bot_user_id) if u}
         if addressed or self._slack_message_mentions_self(routing_text, self_uids):
             return True
         if self._slack_message_addressed_to_other_user(routing_text, self_uids):
             return False
-        if channel_thread_followup and self._slack_thread_followup_silence():
-            return False
+        if channel_thread_followup:
+            configured = _extra_or_secret(
+                self.config.extra, "thread_followup_silence", "SLACK_THREAD_FOLLOWUP_SILENCE",
+                None, blank_is_unset=False)
+            if configured is None or self._slack_thread_followup_silence():
+                return False
         return False if opens_own_session and self._slack_is_free_channel(channel_id) else None
 
     def _slack_message_mentions_self(self, text: str, self_uids: set) -> bool:
@@ -7034,6 +7172,7 @@ _YAML_BRIDGE = (  # (yaml key, env var, kind) for apply_yaml_bridge
     ("require_mention_channels", "SLACK_REQUIRE_MENTION_CHANNELS", "csv"),
     ("reaction_triggers", "SLACK_REACTION_TRIGGERS", "csv"), ("reaction_trigger_target", "SLACK_REACTION_TRIGGER_TARGET", "str"),
     ("allowed_channels", "SLACK_ALLOWED_CHANNELS", "csv"), ("ignored_channels", "SLACK_IGNORED_CHANNELS", "csv"),
+    ("allowed_external_teams", "SLACK_ALLOWED_EXTERNAL_TEAMS", "csv"),
 )
 
 
@@ -7085,3 +7224,10 @@ def register(ctx) -> None:
         env_overrides=gateway_env.ENV_OVERRIDES,
         env_enable_credentials=gateway_env.ENV_ENABLE_CREDENTIALS, **gateway_env.AUTHZ,
     )
+
+    def _sync_live_adapter_class(_native: Any, live_adapter: Any) -> None:
+        if live_adapter is not None and live_adapter.__class__.__name__ == "SlackAdapter" and live_adapter.__class__ is not SlackAdapter:
+            live_adapter.__class__ = SlackAdapter
+            logger.info("[Slack] Hot-reloaded live SlackAdapter class methods in place")
+
+    ctx.register_platform_handler("slack", _sync_live_adapter_class)

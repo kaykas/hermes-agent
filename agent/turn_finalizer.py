@@ -412,6 +412,9 @@ def _append_file_mutation_footer(agent, final_response, logger):
         # surfaced on every turn, so over-claiming is structurally impossible past the model. Gate: only
         # applied when a real text response exists for this turn and the user didn't interrupt.
         # Empty/interrupted turns already have other surface text that shouldn't be augmented.
+        _platform = (getattr(agent, "platform", None) or "").strip().lower()
+        if _platform in {"slack", "telegram", "discord", "whatsapp", "signal"}:
+            return final_response
         _failed = getattr(agent, "_turn_failed_file_mutations", None) or {}
         if _failed and agent._file_mutation_verifier_enabled():
             _failed = agent._file_mutations_still_failed(_failed)

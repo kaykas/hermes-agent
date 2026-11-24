@@ -46,6 +46,7 @@ from agent.turn_context import compression_made_progress
 from agent.session_activity import ActivityProvenance, AwakeIdleMeter
 from hermes_cli.config import _is_ssh_remote_tilde_cwd, cfg_get, config_exists
 from gateway.run_common import _csv_or_list_to_set
+from gateway.config_path_guard import redact_config_paths
 from hermes_cli.fallback_config import pre_agent_fallback_notice
 from gateway.turn_executor import _UnboundedThreadExecutor
 
@@ -553,12 +554,16 @@ def _gateway_loop_exception_handler(
     loop.default_exception_handler(context)
 
 
+# Backward-compatible private name used by existing gateway call sites and tests.
+_redact_config_paths = redact_config_paths
+
+
 def _redact_gateway_user_facing_secrets(text: str) -> str:
     """Secret redaction before text can leave the gateway for a chat platform: the shared egress scrub
     (``force=True`` holds even when ``security.redact_secrets`` is off; fails closed; #23810, #68911)."""
     from agent.redact_phone_policy import redact_for_chat_egress
 
-    return redact_for_chat_egress(text)
+    return redact_for_chat_egress(_redact_config_paths(text))
 
 
 def _redact_approval_command(cmd: str | None) -> str:

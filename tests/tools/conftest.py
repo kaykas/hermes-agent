@@ -237,3 +237,27 @@ def disable_lazy_stt_install():
     """
     with patch("tools.transcription_tools._try_lazy_install_stt", return_value=False):
         yield
+
+
+_SEARCH_PM_ISOLATION_MODULES = {
+    "test_macos_protected_search.py",
+    "test_search_error_guard.py",
+    "test_search_files_scope_guard.py",
+    "test_search_preflight_validation.py",
+}
+
+
+@pytest.fixture(autouse=True)
+def _isolate_search_pm_discovery(request, monkeypatch, tmp_path):
+    """Keep checkout-adjacent PM payload discovery out of search end-to-end tests.
+
+    These tests exercise real local shells and ripgrep/grep paths. PM otherwise
+    probes the live checkout's parent manifest and package store, which is a
+    different host integration surface and trips the real-home I/O guard.
+    """
+    if request.node.fspath.basename not in _SEARCH_PM_ISOLATION_MODULES:
+        yield
+        return
+    monkeypatch.setenv("HERMES_RUNTIME_DIR", str(tmp_path / "pm-store"))
+    monkeypatch.setattr("tools.environments.local._resolve_hermes_bin_dir", lambda: None)
+    yield

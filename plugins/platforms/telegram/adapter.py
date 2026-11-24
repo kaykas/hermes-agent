@@ -11,6 +11,7 @@ import logging
 import os
 import html as _html
 import re
+import random
 import time
 from contextvars import ContextVar
 from datetime import datetime, timezone, UTC
@@ -1739,13 +1740,34 @@ class TelegramAdapter(TelegramContactMixin, TelegramHeldInboundMixin, TelegramRe
         self._spawn_polling_recovery(asyncio.get_running_loop(), self._handle_polling_network_error(error))
 
     async def _delete_webhook_best_effort(self, *, require_success: bool = False) -> bool:
-        """Clear a stale webhook; ``require_success`` (cold start) raises so GatewayRunner disposes the
-        partial adapter, while reconnects recover transient errors in background."""
+        """Clear a stale webhook only when Telegram says one is configured.
+
+        Reconnects must not spend another control-plane round trip on an unconditional
+        deleteWebhook when polling was already active. A transient probe/delete failure
+        degrades to getUpdates recovery; cold starts retain the strict startup gate.
+        """
         if not self._bot:
             return False
         delete_webhook = getattr(self._bot, "delete_webhook", None)
         if not callable(delete_webhook):
             return True
+        get_webhook_info = getattr(self._bot, "get_webhook_info", None)
+        if callable(get_webhook_info):
+            try:
+                info = await _await_with_thread_deadline(get_webhook_info(), timeout=5.0)
+                if not str(getattr(info, "url", "") or "").strip():
+                    logger.debug("[%s] Telegram polling already active; skipping deleteWebhook", self.name)
+                    return True
+            except Exception as err:
+                if not self._looks_like_network_error(err):
+                    raise
+                if require_success:
+                    raise OSError("Telegram getWebhookInfo did not complete during initial connect") from err
+                logger.warning(
+                    "[%s] getWebhookInfo failed during reconnect; skipping deleteWebhook and continuing to getUpdates: %s",
+                    self.name, _redact_telegram_error_text(err))
+                self._send_path_degraded = True
+                return False
         try:
             # Same shielded-cancellation class as initialize/start_polling: never let it pin connect.
             await _await_with_thread_deadline(delete_webhook(drop_pending_updates=False), timeout=_UPDATER_START_TIMEOUT)
@@ -1909,8 +1931,7 @@ class TelegramAdapter(TelegramContactMixin, TelegramHeldInboundMixin, TelegramRe
             await self._go_fatal_network(message, "[%s] %s (rebuilding adapter via supervisor)", self.name, message)
             return
         MAX_NETWORK_RETRIES = 10
-        BASE_DELAY = 5
-        MAX_DELAY = 60
+        MAX_DELAY = 60.0
         self._polling_network_error_count += 1
         self._send_path_degraded = True
         attempt = self._polling_network_error_count
@@ -1919,9 +1940,11 @@ class TelegramAdapter(TelegramContactMixin, TelegramHeldInboundMixin, TelegramRe
                 f'Telegram polling could not reconnect after {MAX_NETWORK_RETRIES:d} network error retries. Escalating to gateway recovery.')
             await self._go_fatal_network(message, "[%s] %s Last error: %s", self.name, message, _redact_telegram_error_text(error, self._ptb_proxy_url))
             return
-        delay = min(BASE_DELAY * (2 ** (attempt - 1)), MAX_DELAY)
+        base_delay = (2.0, 5.0, 15.0)[attempt - 1] if attempt <= 3 else min(15.0 * (2 ** (attempt - 3)), MAX_DELAY)
+        # Desynchronize adapters recovering from the same outage; never jitter above the hard cap.
+        delay = min(base_delay * random.uniform(0.85, 1.15), MAX_DELAY)
         logger.warning(
-            "[%s] Telegram network error (attempt %d/%d), reconnecting in %ds. Error: %s", self.name, attempt,
+            "[%s] Telegram network error (attempt %d/%d), reconnecting in %.1fs. Error: %s", self.name, attempt,
             MAX_NETWORK_RETRIES, delay, _redact_telegram_error_text(error, self._ptb_proxy_url))
         await asyncio.sleep(delay)
         if self._teardown_started:

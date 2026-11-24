@@ -130,7 +130,10 @@ class GatewayTurnPersistenceMixin:
         _silence_source = agent_result.get("queued_terminal_source", source)
         # A bot peer expects no reply even when it addressed us (a DM, a mention): its message may end
         # the exchange in silence, and the visible fallback would be runtime text it answers (#137027).
-        if not automatic_notices_allowed(_silence_source):
+        # A human summons naming multiple fleet bots has the same silence permission: each mentioned
+        # agent may yield to another, and the thread must never receive a gateway error for that choice.
+        if (not automatic_notices_allowed(_silence_source)
+                or getattr(_silence_source, "multi_bot_mentioned", False)):
             _silence_reply_expected = False
         if _intentional_silence and not self._silence_allowed_for_source(
             _silence_source, _silence_kind, _silence_reply_expected, agent_result,

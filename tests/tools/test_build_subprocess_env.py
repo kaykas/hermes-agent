@@ -1,6 +1,7 @@
 """Real children observe factory scrubbing, overrides and routed profile homes."""
 
 import os
+import sys
 
 import pytest
 
@@ -41,6 +42,17 @@ def test_no_scrub_is_byte_preserving_except_explicit_extra():
     assert build_subprocess_env(base, scrub_secrets=False, extra={"HERMES_HOME": "/caller"})["HERMES_HOME"] == "/caller"
 
 
+def test_child_python3_resolves_running_interpreter_first():
+    base = {"PATH": "/usr/bin:/bin", "HERMES_HOME": "/original"}
+    env = build_subprocess_env(base, scrub_secrets=True)
+    python_bin = os.path.dirname(sys.executable)
+    import shutil
+    shim = "python3.exe" if os.name == "nt" else "python3"
+    assert shutil.which(shim, path=env["PATH"]) == os.path.join(python_bin, shim)
+    env2 = build_subprocess_env(env, scrub_secrets=True)
+    assert env2["PATH"].split(os.pathsep).count(python_bin) == 1
+
+
 def test_e2e_scrubbed_env_resolves_bare_hermes_under_minimal_parent_path(monkeypatch, tmp_path):
     """Regression for #92998/#93082: a gateway launched by systemd/cron with a
     minimal PATH (no hermes console-script dir) must still hand cron job
@@ -68,6 +80,7 @@ def test_e2e_scrubbed_env_resolves_bare_hermes_under_minimal_parent_path(monkeyp
     assert shutil.which("hermes", path=minimal_path) is None
 
     env = build_subprocess_env(scrub_secrets=True)  # cron _run_job_script path
+    monkeypatch.setenv("PATH", env["PATH"])
 
     resolved = shutil.which("hermes", path=env.get("PATH", ""))
     assert resolved is not None, (

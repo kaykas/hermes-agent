@@ -145,3 +145,49 @@ def test_identity_prompt_names_the_bot():
     assert "@TestBot" in prompt
 
 
+def test_identity_prompt_lists_peers_without_own_user_id():
+    adapter = _make_adapter()
+    adapter._bot_display_name = "Nova Deux"
+    adapter._team_bot_names = {}
+    adapter._team_bot_user_ids = {"T1": "U0BSHRLESQ4"}
+    adapter._bot_user_id = "U0BSHRLESQ4"
+    prompt = adapter._build_identity_prompt(team_id="T1")
+    assert "Sibling fleet bots" in prompt
+    assert "@Cedar (<@U0BPART3D50>)" in prompt
+    assert "first named bot is the single human-facing voice" in prompt
+    assert "Do not post acknowledgments, standby notices, lane claims, or repeated status updates" in prompt
+    assert "U0BSHRLESQ4" not in prompt
+
+
+def test_thread_invalidation_clears_only_matching_thread_state():
+    adapter = _make_adapter()
+    adapter._thread_rehydration_checked = {
+        "T1:C1:123:U1", "T1:C1:123:U2", "T1:C1:999:U1",
+    }
+    adapter._thread_context_cache = MagicMock()
+    adapter._thread_cache_key = MagicMock(return_value="cache-key")
+    adapter._invalidate_thread_rehydration("C1", "123", "T1")
+    assert adapter._thread_rehydration_checked == {"T1:C1:999:U1"}
+    adapter._thread_context_cache.pop.assert_called_once_with("cache-key", None)
+
+
+@pytest.mark.asyncio
+async def test_prefilter_invalidates_outer_payload_team_thread():
+    adapter = _make_adapter()
+    adapter._dedup = MagicMock()
+    adapter._dedup.is_duplicate.return_value = False
+    adapter._is_ignored_channel = MagicMock(return_value=False)
+    adapter._event_declares_bot_sender = MagicMock(return_value=True)
+    adapter._slack_allow_bots = MagicMock(return_value="none")
+    adapter._thread_rehydration_checked = {"T1:C1:123:U1"}
+    adapter._thread_context_cache = MagicMock()
+    adapter._thread_cache_key = MagicMock(return_value="cache-key")
+
+    event = {
+        "channel": "C1", "thread_ts": "123", "ts": "456",
+        "user": "U_BOT", "bot_id": "B1",
+    }
+    assert await adapter._prefilter_inbound(event, {"team_id": "T1"}) is None
+    assert adapter._thread_rehydration_checked == set()
+    adapter._thread_context_cache.pop.assert_called_once_with("cache-key", None)
+
