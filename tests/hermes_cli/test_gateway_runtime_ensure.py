@@ -34,6 +34,10 @@ def test_unmanaged_runtime_drops_session_config_bypass_flags(tmp_path, monkeypat
     monkeypatch.setenv('RUNTIME_TEST_SENTINEL', 'retained')
     monkeypatch.setattr(gateway_windows, 'windowless_gateway_restart_spec',
                         lambda command: (command, None, {'RUNTIME_TEST_OVERLAY': '1'}))
+    # Exercise the direct unmanaged spawn on every host. On macOS the production
+    # path otherwise probes launchd through subprocess.run, which shares the
+    # Popen double below and is not the boundary under test.
+    monkeypatch.setattr(start, 'start_gateway_job', lambda *a, **k: None)
     captured = {}
     child = SimpleNamespace(pid=123)
     def spawn(command, **kwargs):

@@ -54,6 +54,9 @@ class FakeHost(SystemHost):
     def unit_props(self, unit, scope):
         return {"UnitFileState": "enabled", "ActiveState": "active", "ControlGroup": f"/fake/{unit}"}
 
+    def unit_environment(self, unit, scope):
+        return {"HERMES_HOME": str(self.home)}, None
+
     def process_env(self, pid):
         return {"HERMES_DASHBOARD_BASIC_AUTH_USERNAME": "spike", "HERMES_DASHBOARD_BASIC_AUTH_PASSWORD": _PASSWORD}
 
