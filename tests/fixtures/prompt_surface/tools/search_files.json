@@ -5,26 +5,30 @@
     "properties": {
       "context": {
         "default": 0,
-        "description": "Content search only: lines of context before and after each match.",
+        "description": "Number of context lines before and after each match (grep mode only)",
         "type": "integer"
       },
       "file_glob": {
-        "description": "Content search only: filter files by pattern (e.g. '*.py').",
+        "description": "Filter files by pattern in grep mode (e.g., '*.py' to only search Python files)",
         "type": "string"
+      },
+      "fixed_strings": {
+        "description": "Content search: match pattern literally, not as a regex. Omitted: on automatically for punctuation-heavy patterns with no regex syntax",
+        "type": "boolean"
       },
       "limit": {
         "default": 50,
-        "description": "Maximum number of results.",
+        "description": "Maximum number of results to return (default: 50)",
         "type": "integer"
       },
       "offset": {
         "default": 0,
-        "description": "Skip first N results for pagination.",
+        "description": "Skip first N results for pagination (default: 0)",
         "type": "integer"
       },
       "order": {
         "default": "discovery",
-        "description": "File search only: 'discovery' is fast bounded traversal order; 'modified' is exact global newest-first and may scan the full tree.",
+        "description": "File-search order: 'discovery' is fast bounded traversal order; 'modified' is exact global newest-first and may scan the full tree; ignored for content",
         "enum": [
           "discovery",
           "modified"
@@ -33,7 +37,7 @@
       },
       "output_mode": {
         "default": "content",
-        "description": "Content search only: 'content' shows matching lines with line numbers, 'files_only' lists file paths, 'count' shows match counts per file.",
+        "description": "Output format for grep mode: 'content' shows matching lines with line numbers, 'files_only' lists file paths, 'count' shows match counts per file",
         "enum": [
           "content",
           "files_only",
@@ -43,16 +47,16 @@
       },
       "path": {
         "default": ".",
-        "description": "Directory or file to search in.",
+        "description": "Directory or file to search in (default: current working directory)",
         "type": "string"
       },
       "pattern": {
-        "description": "Regex for content search; glob (e.g. '*.py', '*config*') for file search.",
+        "description": "Regex pattern for content search, or glob pattern (e.g., '*.py') for file search. File globs take no regex syntax (|, \\d, ^, $); use '*.{yml,yaml}' for alternatives",
         "type": "string"
       },
       "target": {
         "default": "content",
-        "description": "'content' searches inside files, 'files' finds files by name.",
+        "description": "'content' searches inside file contents, 'files' searches for files by name",
         "enum": [
           "content",
           "files"
