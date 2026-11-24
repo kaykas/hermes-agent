@@ -61,6 +61,18 @@ def update_tree(tmp_path, monkeypatch):
     monkeypatch.setattr(cli_main, '_pause_windows_gateways_for_update', lambda: None)
     resumed = []
     monkeypatch.setattr(cli_main, '_resume_windows_gateways_after_update', lambda state: resumed.append(state))
+    monkeypatch.setattr('hermes_cli.update_cmd_posix_pause._discover_systemd', list)
+    monkeypatch.setattr('hermes_cli.update_cmd_posix_pause._discover_launchd', list)
+    monkeypatch.setattr('hermes_cli.update_cmd_posix_pause._discover_bare', lambda _pids: ([], []))
+    # macOS uses the owner-watched Popen custody path; route it through the
+    # same subprocess.run spy these real-git tests install on every host.
+    from hermes_cli import update_custody
+
+    def _run_with_git_spy(argv, kwargs, watch_owner=True):
+        check = kwargs.pop('check', False)
+        return subprocess.run(list(argv), check=check, **kwargs)
+
+    monkeypatch.setattr(update_custody, '_run_owner_watched', _run_with_git_spy)
     monkeypatch.setattr(cli_main, '_install_hangup_protection', lambda **_: {'installed': False})
     monkeypatch.setattr(cli_main, '_finalize_update_output', lambda *_: None)
     plans = []

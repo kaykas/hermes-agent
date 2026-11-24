@@ -370,6 +370,37 @@ def _hermetic_environment(tmp_path, tmp_path_factory, monkeypatch):
     # guard for in-process code under test.
     monkeypatch.delenv("HERMES_STATE_DB_GUARD_BYPASS", raising=False)
 
+    # A checkout-owned .venv makes cmd_update's production handoff treat every
+    # temporary PROJECT_ROOT fixture as a foreign editable install. In-process
+    # unit tests are not launcher entries: keep that handoff out of them while
+    # leaving owning_install_root and real subprocess CLI coverage unchanged.
+    from hermes_cli import update_owning_install
+    monkeypatch.setattr(update_owning_install, "retarget_to_owning_install", lambda _root: None)
+
+    # Unit tests must not enumerate the operator's processes. On macOS a real
+    # psutil scan also reads foreign cwds under the real Hermes home, tripping
+    # the I/O guard before any worktree assertion runs. Preserve the contract
+    # for the current fixture process only; lock/PID tests keep their own fakes.
+    from hermes_cli import worktree_sweep
+
+    def _fixture_live_pids(roots, exclude):
+        import psutil
+
+        hits = {}
+        processes = [psutil.Process(os.getpid()), *psutil.Process(os.getpid()).children(recursive=True)]
+        for proc in processes:
+            if proc.pid in exclude:
+                continue
+            try:
+                root = worktree_sweep._inside(os.path.realpath(proc.cwd()), roots)
+            except (psutil.Error, OSError):
+                continue
+            if root is not None:
+                hits.setdefault(root, []).append(proc.pid)
+        return hits
+
+    monkeypatch.setattr(worktree_sweep, "_psutil_live_pids", _fixture_live_pids)
+
     # 3b. Multi-profile hosting is a process-global latch (``set_multiplex_active`` and the
     #     launch-env snapshot flip once and stay). A test that routes one RPC/request to a named
     #     profile would otherwise leave every later test in the file fail-closed (unscoped

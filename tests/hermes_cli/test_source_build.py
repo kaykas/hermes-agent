@@ -27,6 +27,24 @@ def use_host_node_as_pm_node(monkeypatch):
         SimpleNamespace(binary=node) if name == "node" else real(name, **kwargs)))
 
 
+def _host_pnpm_12():
+    """The retry and lock behavior under test requires pnpm 12, not merely PATH's first pnpm."""
+    name = "pnpm.exe" if os.name == "nt" else "pnpm"
+    for directory in os.get_exec_path():
+        candidate = Path(directory) / name
+        if ".hermes" in candidate.parts:
+            continue
+        try:
+            done = subprocess.run([str(candidate), "--version"], capture_output=True, text=True,
+                                  encoding="utf-8", timeout=15, check=False)
+        except OSError:
+            continue
+        if done.returncode == 0 and done.stdout.strip().split(".", 1)[0].isdigit() \
+                and int(done.stdout.strip().split(".", 1)[0]) >= 12:
+            return str(candidate)
+    return None
+
+
 def copy_freshness_scripts(root):
     repository = Path(__file__).resolve().parents[2]
     scripts = root / "scripts/build"
@@ -94,8 +112,8 @@ def test_installed_pnpm_does_not_authorize_missing_workspace_dependencies(source
 
 @pytest.fixture
 def source_checkout(tmp_path, monkeypatch):
-    node, pnpm = shutil.which("node"), shutil.which("pnpm")
-    assert node and pnpm, "source-build integration requires node and pnpm"
+    node, pnpm = shutil.which("node"), _host_pnpm_12()
+    assert node and pnpm, "source-build integration requires node and pnpm 12+"
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(home))
