@@ -267,6 +267,7 @@ from tests._fixtures.live_system_guard import (
 )
 from tests._fixtures.model_peer import model_peer  # fixture registers here
 from tests._fixtures.platform_gating import _platforms_gate_reason, _reject_contradictory_platform_marks
+from tests._fixtures.process_isolation import _isolate_process_discovery  # fixture registers here
 
 
 @pytest.fixture(autouse=True)
@@ -441,6 +442,25 @@ def _hermetic_environment(tmp_path, tmp_path_factory, monkeypatch):
 def _isolate_hermes_home(_hermetic_environment):
     """Alias preserved for any test that yields this name explicitly."""
     return
+
+
+@pytest.fixture(autouse=True)
+def _isolate_profile_wrapper_discovery(_hermetic_environment, tmp_path, monkeypatch):
+    """Keep profile alias discovery away from the account's real wrapper directory."""
+    # Import here as well as patching already-loaded modules: several profile
+    # tests import list_profiles inside the test body, after fixtures have run.
+    from hermes_cli import profiles
+
+    original = profiles._get_wrapper_dir
+    account_wrapper_dir = Path.home() / ".local" / "bin"
+
+    def isolated_wrapper_dir():
+        current = original()
+        # A test's own Path.home()/HERMES_HOME override still wins. Only an
+        # unredirected account path is moved into this test's temporary home.
+        return tmp_path / ".local" / "bin" if current == account_wrapper_dir else current
+
+    monkeypatch.setattr(profiles, "_get_wrapper_dir", isolated_wrapper_dir)
 
 
 @pytest.fixture(autouse=True)
