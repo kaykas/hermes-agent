@@ -23,7 +23,7 @@ from gateway.platforms.base_log_safety import _log_safe_path, describe_proxy_err
 from gateway.platforms.base_image_sniff import _looks_like_image
 from gateway.platforms.base_media_flags import pad_inline_flags
 from gateway.platforms.base_kanban_media import _kanban_attachment_roots, _kanban_board_db_paths
-from gateway.runtime_footer import footer_onto_photo_caption, send_footer_unless_captioned
+from gateway.runtime_footer import FooteredReply, footer_onto_photo_caption, send_footer_unless_captioned
 from gateway.platforms.session_model import _SessionModelSettingsMixin
 from gateway.config_path_guard import is_protected_config_attachment, redact_config_paths
 
@@ -4264,9 +4264,17 @@ class BasePlatformAdapter(_SessionModelSettingsMixin, ABC):
         image URLs → residual directives → bare local paths (skipped for ephemeral notices so config
         paths stay text; unknown-extension MEDIA tags survive for the bare-path detector). History
         dedup is bare-path only, off-loop, fail-open. An emptied non-empty response is recovered."""
-        # Normalize protected config references before any MEDIA or bare-path extraction. The
-        # attachment filters and direct send_document guard below independently deny ~/ forms.
-        response = redact_config_paths(response)
+        # Normalize protected config references before any MEDIA or bare-path extraction. Preserve
+        # FooteredReply's out-of-band footer: redaction returns a plain str, which otherwise drops
+        # the metadata that moves a footer-only reply onto the photo caption.
+        runtime_footer = getattr(response, "runtime_footer", None)
+        if runtime_footer is not None:
+            footer_suffix = f"\n\n{runtime_footer}"
+            body = response[:-len(footer_suffix)] if response.endswith(footer_suffix) else str(response)
+            response = FooteredReply(
+                redact_config_paths(body), redact_config_paths(runtime_footer))
+        else:
+            response = redact_config_paths(response)
         # Captured before extract_media strips it: images then go via send_document (no recompression).
         force_document = "[[as_document]]" in response
         pre_extract = response
