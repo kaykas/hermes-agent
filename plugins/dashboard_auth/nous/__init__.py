@@ -190,10 +190,16 @@ def _settings() -> dict:
 
 
 def _is_root_hermes_home() -> bool:
-    """Only the launch root owns global dashboard auth; multiplex profiles are guests."""
-    root = os.path.abspath(os.path.expanduser("~/.hermes"))
-    configured = os.path.abspath(os.path.expanduser(os.environ.get("HERMES_HOME", root)))
-    return configured == root
+    """Only the launch root owns global dashboard auth; multiplex profiles are guests.
+
+    Custom and isolated roots are launch roots too. Comparing against a literal
+    ``~/.hermes`` mistakes every such process for a guest and leaves its public
+    listener without the provider that its own configuration registered.
+    """
+    from hermes_constants import get_default_hermes_root, get_process_hermes_home
+
+    return (get_process_hermes_home().resolve(strict=False)
+            == get_default_hermes_root().resolve(strict=False))
 
 
 def register(ctx) -> None:

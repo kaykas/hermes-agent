@@ -320,12 +320,6 @@ def _finalize_child_env(env: dict) -> dict:
     _apply_profile_home(env)
     _inject_session_context_env(env)
     _strip_hermes_owned_pythonpath_and_runtime_markers(env)
-    path_key = _path_env_key(env)
-    if path_key is not None:
-        env[path_key] = _prepend_current_python_bin_dir(env.get(path_key, ""))
-        # Keep the selected Hermes shim ahead of the interpreter's own shim;
-        # ``python3`` still resolves through the remaining PATH entries.
-        env[path_key] = _prepend_hermes_bin_dir(env[path_key])
     strip_supervised_process_identity(env)
     _apply_windows_msys_bash_env_defaults(env)
     from agent.delegation_context import delegated_child_subprocess_env
@@ -432,7 +426,16 @@ def build_subprocess_env(
             # exactly as they do in the launch process (``_apply_managed_env`` applies them last).
             restore_managed_env(env)
     if scrub_secrets:
-        return _sanitize_subprocess_env(env, dict(extra) if extra else None)
+        env = _sanitize_subprocess_env(env, dict(extra) if extra else None)
+        # The general factory guarantees its children the running interpreter.
+        # Keep this out of _finalize_child_env: terminal and sanitizer callers
+        # have their own operator-PATH precedence contracts. Re-apply the
+        # selected Hermes shim last so an interpreter-dir shim cannot shadow it.
+        path_key = _path_env_key(env)
+        if path_key is not None:
+            env[path_key] = _prepend_hermes_bin_dir(
+                _prepend_current_python_bin_dir(env.get(path_key, "")), move_to_front=True)
+        return env
     if inherit_profile_home:
         _apply_profile_home(env)
     if extra:
@@ -773,16 +776,19 @@ def _prepend_current_python_bin_dir(existing_path: str) -> str:
     return os.pathsep.join([bin_dir, *rest])
 
 
-def _prepend_hermes_bin_dir(existing_path: str) -> str:
-    """Move the selected Hermes console-script dir to the front without duplicating it.
+def _prepend_hermes_bin_dir(existing_path: str, *, move_to_front: bool = False) -> str:
+    """Prepend the hermes install dir to ``existing_path`` if missing.
 
-    A login PATH can list another install's ``hermes`` ahead of the selected one.
+    A sealed payload's launcher dir moves to the front even when already listed:
+    a login PATH can list another install's ``hermes`` ahead of it. The general
+    factory requests the same final-transform guarantee; other callers preserve
+    an existing non-payload entry's position.
     """
     bin_dir = _resolve_hermes_bin_dir()
-    if not bin_dir:
-        return existing_path
-    rest = [entry for entry in existing_path.split(os.pathsep) if entry and entry != bin_dir]
-    return os.pathsep.join([bin_dir, *rest])
+    if bin_dir and (move_to_front or _HERMES_BIN_DIR_IS_PAYLOAD):
+        rest = [entry for entry in existing_path.split(os.pathsep) if entry and entry != bin_dir]
+        return os.pathsep.join([bin_dir, *rest])
+    return _prepend_missing_path_entries(existing_path, [bin_dir] if bin_dir else [])
 
 
 def _managed_runtime_path_entries() -> list[str]:
