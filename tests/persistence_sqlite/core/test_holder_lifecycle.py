@@ -156,12 +156,15 @@ class TestReadBarrierOnALoopThread:
         assert not holder._token_queue and not holder._token_writer_busy
 
 
-def _hold_write_lock(path, hold_s, started):
+def _hold_write_lock(path, hold_s, started, release=None):
     conn = sqlite3.connect(str(path), timeout=1.0, isolation_level=None)
     try:
         conn.execute("BEGIN IMMEDIATE")
         started.set()
-        time.sleep(hold_s)  # health: allow HX013 -- the sibling holding the write lock this long is the contention under test
+        if release is None:
+            time.sleep(hold_s)  # health: allow HX013 -- the sibling holding the write lock this long is the contention under test
+        else:
+            release.wait(10.0)  # deterministic contention: the test releases it at the asserted transition
         conn.execute("COMMIT")
     finally:
         conn.close()
@@ -170,21 +173,23 @@ def _hold_write_lock(path, hold_s, started):
 class TestWriteLockReplay:
     def test_write_replays_until_a_sibling_releases_the_lock(self, holder, db_path, monkeypatch):
         retries = []
+        release = threading.Event()
         original = holder._sleep_before_write_retry
 
         def counting(deadline, patience_s):
             retries.append(patience_s)
+            release.set()  # the first locked BEGIN IMMEDIATE happened; let the replay acquire the lock
             return original(deadline, patience_s)
 
         monkeypatch.setattr(holder, "_sleep_before_write_retry", counting)
         started = threading.Event()
-        # Held past the writer connection's 1s busy timeout, so BEGIN IMMEDIATE fails and is retried.
-        sibling = threading.Thread(target=_hold_write_lock, args=(db_path, 1.3, started))
+        sibling = threading.Thread(target=_hold_write_lock, args=(db_path, 1.3, started, release))
         sibling.start()
         try:
             assert started.wait(5.0)
             holder.set_meta("k", "after-sibling")
         finally:
+            release.set()
             sibling.join(10.0)
         assert retries, "the locked BEGIN IMMEDIATE was not retried"
         assert holder.get_meta("k") == "after-sibling"
@@ -204,13 +209,15 @@ class TestWriteLockReplay:
 
     def test_exhausted_patience_raises_the_locked_error(self, holder, db_path):
         started = threading.Event()
-        sibling = threading.Thread(target=_hold_write_lock, args=(db_path, 1.5, started))
+        release = threading.Event()
+        sibling = threading.Thread(target=_hold_write_lock, args=(db_path, 1.5, started, release))
         sibling.start()
         try:
             assert started.wait(5.0)
             with pytest.raises(sqlite3.OperationalError) as excinfo:
                 holder._write_sql("INSERT INTO state_meta (key, value) VALUES ('k', 'v')", patience_s=0.05)
         finally:
+            release.set()
             sibling.join(10.0)
         text = str(excinfo.value)
         assert text.startswith("database is locked (another Hermes process held the state.db write lock")

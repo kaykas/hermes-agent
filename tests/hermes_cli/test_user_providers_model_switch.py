@@ -13,6 +13,8 @@ from hermes_cli import runtime_provider as rp
 @pytest.fixture(autouse=True)
 def _no_live_builtin_provider_probes(monkeypatch):
     """Keep picker tests offline: builtin-provider catalog fetches hit the network."""
+    from hermes_cli import models as models_mod
+
     monkeypatch.setattr("hermes_cli.models.fetch_api_models", lambda *_a, **_kw: None)
     monkeypatch.setattr(
         "hermes_cli.models.cached_provider_model_ids", lambda *_a, **_kw: []
@@ -20,6 +22,15 @@ def _no_live_builtin_provider_probes(monkeypatch):
     monkeypatch.setattr(
         "hermes_cli.models.provider_model_ids", lambda *_a, **_kw: []
     )
+
+    def _without_ambient_disk_cache(api_key, base_url, **kwargs):
+        """Route custom discovery through each test's fake instead of a developer's warm cache."""
+        return models_mod.fetch_api_models(
+            api_key, base_url, timeout=kwargs.get("timeout", 5.0),
+            api_mode=kwargs.get("api_mode"), headers=kwargs.get("headers"),
+        )
+
+    monkeypatch.setattr(models_mod, "cached_fetch_api_models", _without_ambient_disk_cache)
 
 
 # =============================================================================
