@@ -29,6 +29,9 @@ def bundle(tmp_path, monkeypatch):
     # Host-independent artifact contract; executable lookup itself is covered natively.
     from hermes_cli import main_desktop
     monkeypatch.setattr(main_desktop, '_desktop_packaged_executable', lambda _: resources.parent / 'Hermes.exe')
+    # The fake executable uses a host-neutral layout; do not reinterpret it as
+    # this host's native packaged-app layout when locating the renderer.
+    monkeypatch.setattr(main_desktop, '_renderer_bundle_dir', lambda *_a, **_k: dist)
     copy_freshness_scripts(tmp_path)
     stamp_product(tmp_path, "desktop", dist)
     use_host_node_as_pm_node(monkeypatch)

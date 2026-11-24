@@ -272,8 +272,11 @@ def _apply_additive_schema(path: Path, budget: _Budget | None = None) -> None:
                                      isolation_level=None)) as conn:
         _reapply_durability_barriers(conn)
         budget.arm(conn)
-        conn.execute('BEGIN IMMEDIATE')
         try:
+            # BEGIN participates in the same deadline as the DDL. In particular,
+            # an interrupted BEGIN must roll back and use the browse-budget
+            # refusal, not escape as a generic SQLite/schema failure.
+            conn.execute('BEGIN IMMEDIATE')
             cursor = conn.cursor()
             apply_declared_schema(cursor, path.parent)
             # Postcondition, still inside the transaction: every declared table/column resolves.
