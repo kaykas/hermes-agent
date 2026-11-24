@@ -19,6 +19,7 @@ from tests.hermes_cli.test_session_recovery import (
 from tests.hermes_cli.test_session_recovery_lost_and_found import _make_schema_unreadable_source
 
 _FREE_SPACE = ("work_dir_free_bytes", "output_dir_free_bytes")
+_NEW_STORE_IDENTITY = frozenset({"db_file_generation", "store_created_at_utc", "store_instance_id"})
 
 
 def _normalized(report, output: Path):
@@ -53,7 +54,16 @@ def _assert_same_recovery(tmp_path: Path, source: Path, **kwargs) -> dict:
     legacy = recover_session_database(source, legacy_out, **kwargs)
     admin = SQLiteStoreAdmin.recover_transcripts(source, admin_out, **kwargs)
     assert _normalized(admin, admin_out) == _normalized(legacy, legacy_out)
-    assert _database(admin_out) == _database(legacy_out)
+    admin_db, legacy_db = _database(admin_out), _database(legacy_out)
+    if admin.get("mode") == "lost_and_found_salvage":
+        # Page-level salvage creates two independent destination stores. Their new UUIDs and
+        # creation timestamps must differ; compare that the same identity keys exist, not their values.
+        for database in (admin_db, legacy_db):
+            database["rows"]["state_meta"] = [
+                (key, f"<{key}>" if key in _NEW_STORE_IDENTITY else value)
+                for key, value in database["rows"]["state_meta"]
+            ]
+    assert admin_db == legacy_db
     assert _source_state(source) == before
     return admin
 

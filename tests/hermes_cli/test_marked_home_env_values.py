@@ -209,7 +209,7 @@ def test_a_marker_written_by_another_process_is_seen_at_the_next_read(root):
     assert cfg.get_env_value("MH2_KEY") == "from-the-ops-home"
 
 
-def test_a_marker_is_seen_when_its_folders_time_does_not_move(root):
+def test_a_marker_is_seen_when_its_folders_time_does_not_move(root, monkeypatch):
     """Not every filesystem touches a folder's time when a file is added to it, and two changes can
     share one tick of its clock: the marker file's own stat is part of what is compared."""
     folder = pre.run_elsewhere_dir(root)
@@ -217,6 +217,26 @@ def test_a_marker_is_seen_when_its_folders_time_does_not_move(root):
     (folder / "dev.json").write_text("{}", encoding="utf-8")
     assert cfg.get_env_value("MH2_KEY") == "from-the-ops-home"
     before = os.stat(folder)
+    real_stat = os.stat
+
+    def stable_folder_size(path, *args, **kwargs):
+        """Simulate a filesystem whose directory size also stays put across entry changes."""
+        st = real_stat(path, *args, **kwargs)
+        try:
+            is_folder = Path(path) == folder
+        except TypeError:
+            is_folder = False
+        if is_folder:
+            fields = list(st[:10])
+            fields[6] = before.st_size
+            return os.stat_result(fields, {
+                "st_atime_ns": st.st_atime_ns, "st_mtime_ns": st.st_mtime_ns, "st_ctime_ns": st.st_ctime_ns,
+            })
+        return st
+
+    # APFS grows a directory's size when an entry is added even after its mtime is restored. Pin
+    # that host-specific field so the marker file's own stat is the only changing signal.
+    monkeypatch.setattr(pre.os, "stat", stable_folder_size)
     marker = folder / "ops.json"
     for change, expected in ((lambda: marker.write_text("{}", encoding="utf-8"), None),
                              (marker.unlink, "from-the-ops-home")):
