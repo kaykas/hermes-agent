@@ -67,7 +67,10 @@ def immature_picks(pnpm: str, root: Path, env: dict[str, str], *, timeout: int =
         except ValueError:
             continue
         if isinstance(record, dict) and record.get("code") == NO_MATURE:
-            picks.update(_VIOLATION.findall(str(record.get("message", ""))))
+            message = record.get("message", "")
+            if not message and isinstance(record.get("err"), dict):
+                message = record["err"].get("message", "")
+            picks.update(_VIOLATION.findall(str(message)))
     return sorted(picks)
 
 

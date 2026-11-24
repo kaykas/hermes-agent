@@ -1,7 +1,11 @@
 """`hermes pm update --pnpm` drops the release-age excludes a refreshed lock no longer holds."""
+import json
+from types import SimpleNamespace
+
 import pytest
 
 import hermes_yaml
+from pm import pnpm_release_age
 from pm.pnpm_release_age import exclude_hint, prune_excludes
 
 LOCK = """lockfileVersion: '9.0'
@@ -70,3 +74,16 @@ def test_hint_lines_paste_as_the_exclude_list_they_name():
     assert '    - young@1.0.0  # ' in hint  # a safe name stays plain
     pasted = [line for line in hint.splitlines() if line.lstrip().startswith('- ')]
     assert hermes_yaml.safe_load('minimumReleaseAgeExclude:\n' + '\n'.join(pasted)) == {'minimumReleaseAgeExclude': picks}
+
+
+def test_immature_picks_reads_pnpm_nested_ndjson_error(monkeypatch, tmp_path):
+    message = ('1 version does not meet the minimumReleaseAge constraint:\n'
+               '  aging-fixture@1.1.0 was published at 2026-11-24T00:00:00.000Z, within the cutoff')
+    result = SimpleNamespace(stdout=json.dumps({
+        'code': pnpm_release_age.NO_MATURE,
+        'err': {'message': message},
+    }), stderr='')
+    monkeypatch.setattr(pnpm_release_age, '_stage_inputs', lambda *args: None)
+    monkeypatch.setattr(pnpm_release_age, '_run', lambda *args, **kwargs: result)
+
+    assert pnpm_release_age.immature_picks('pnpm', tmp_path, {}) == ['aging-fixture@1.1.0']
