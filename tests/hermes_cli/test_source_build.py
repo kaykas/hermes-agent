@@ -30,9 +30,20 @@ def use_host_node_as_pm_node(monkeypatch):
 def _host_pnpm_12():
     """The retry and lock behavior under test requires pnpm 12, not merely PATH's first pnpm."""
     name = "pnpm.exe" if os.name == "nt" else "pnpm"
-    for directory in os.get_exec_path():
-        candidate = Path(directory) / name
-        if ".hermes" in candidate.parts:
+    candidates = [Path(directory) / name for directory in os.get_exec_path()]
+    if os.name != "nt":
+        # A host can have a current pnpm cached by Corepack while PATH exposes
+        # only an older standalone release. Use the cached executable directly:
+        # invoking Corepack itself could resolve/download a toolchain in tests.
+        if os.environ.get("COREPACK_HOME"):
+            corepack = Path(os.environ["COREPACK_HOME"])
+        else:
+            # Resolve Corepack's default cache from the account home rather
+            # than invoking Corepack; test discovery must never download tools.
+            corepack = Path.home() / ".cache" / "node" / "corepack"
+        candidates.extend(corepack.glob("v1/pnpm/*/pnpm-native"))
+    for candidate in candidates:
+        if ".hermes" in candidate.parts or not candidate.is_file():
             continue
         try:
             done = subprocess.run([str(candidate), "--version"], capture_output=True, text=True,
@@ -112,8 +123,21 @@ def test_installed_pnpm_does_not_authorize_missing_workspace_dependencies(source
 
 @pytest.fixture
 def source_checkout(tmp_path, monkeypatch):
-    node, pnpm = shutil.which("node"), _host_pnpm_12()
-    assert node and pnpm, "source-build integration requires node and pnpm 12+"
+    node = shutil.which("node")
+    pnpm = _host_pnpm_12()
+    if pnpm and Path(pnpm).name == "pnpm-native":
+        # PM's Runner resolves the command name `pnpm` inside this directory.
+        # Give the cached native binary that name so it cannot resolve the
+        # shebang-less Corepack fallback script beside it (ENOEXEC on macOS).
+        shim_dir = tmp_path / "host-pnpm-bin"
+        shim_dir.mkdir()
+        shim = shim_dir / "pnpm"
+        shim.symlink_to(pnpm)
+        monkeypatch.setenv("PATH", os.pathsep.join([str(shim_dir), os.environ["PATH"]]))
+        pnpm = str(shim)
+    if not node or not pnpm:
+        pytest.skip("source-build integration requires node and pnpm 12+")
+    assert node and pnpm  # narrow the host-tool fixture for static analysis
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(home))
