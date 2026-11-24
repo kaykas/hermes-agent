@@ -35,6 +35,10 @@ async def test_secondary_ports_and_foreign_listener(tmp_path, monkeypatch):
     import plugins.platforms.whatsapp.adapter as module
     adapters = []
     listener = socket.socket()
+    if os.name != "nt":
+        # Allocation probes with the bridge's POSIX SO_REUSEADDR semantics, so the
+        # listener that stands in for it must tolerate the same TIME-WAIT entries.
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     monkeypatch.setattr(module, "find_node_executable", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(module, "_write_bridge_pidfile", lambda *a: None)
     for name in ("a", "b"):
