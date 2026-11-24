@@ -11,6 +11,7 @@ import sqlite3
 
 import pytest
 
+import sqlite_support
 from sqlite_support import apply_durability_barriers
 
 
@@ -40,6 +41,8 @@ def test_guest_barriers_apply_configured_synchronous(monkeypatch, tmp_path):
 
 
 def test_guest_barriers_leave_synchronous_alone_when_unset(monkeypatch, tmp_path):
+    # Darwin deliberately enforces a FULL floor; exercise the unset-config contract independently.
+    monkeypatch.setattr(sqlite_support.sys, "platform", "linux")
     _config(monkeypatch, {})
     conn = sqlite3.connect(tmp_path / "state.db")
     try:

@@ -665,7 +665,7 @@ def test_a_marked_link_pointed_at_another_directory_is_seen_at_the_next_asking(r
     assert pre.home_runs_elsewhere(linked) and not pre.home_runs_elsewhere(ops)
 
 
-def test_a_marker_for_a_link_is_seen_when_the_folders_time_does_not_move(root, linked):
+def test_a_marker_for_a_link_is_seen_when_the_folders_time_does_not_move(root, linked, monkeypatch):
     """Two changes of the marker folder can share one tick of the filesystem's clock, and then the
     folder's time says nothing about the second: a folder that changed a moment ago is listed at
     every asking."""
@@ -673,6 +673,26 @@ def test_a_marker_for_a_link_is_seen_when_the_folders_time_does_not_move(root, l
     pre.mark_profile_run_elsewhere("ops", "sandbox-plugin")
     assert not pre.home_runs_elsewhere(linked)
     before = os.stat(folder)
+    real_stat = os.stat
+
+    def stable_folder_size(path, *args, **kwargs):
+        """Simulate a filesystem whose directory size also stays put across entry changes."""
+        st = real_stat(path, *args, **kwargs)
+        try:
+            is_folder = Path(path) == folder
+        except TypeError:
+            is_folder = False
+        if is_folder:
+            fields = list(st[:10])
+            fields[6] = before.st_size
+            return os.stat_result(fields, {
+                "st_atime_ns": st.st_atime_ns, "st_mtime_ns": st.st_mtime_ns, "st_ctime_ns": st.st_ctime_ns,
+            })
+        return st
+
+    # APFS grows a directory's size when an entry is added even after its mtime is restored. Pin
+    # that host-specific field so the marker file's own stat is the only changing signal.
+    monkeypatch.setattr(pre.os, "stat", stable_folder_size)
     marker = folder / "linked.json"
     for change, expected in ((lambda: marker.write_text("{}", encoding="utf-8"), True), (marker.unlink, False)):
         change()
