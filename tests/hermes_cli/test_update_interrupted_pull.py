@@ -288,7 +288,9 @@ def test_concurrent_launches_take_turns_and_all_rerun_from_the_restored_tree(tmp
         (origin / name).write_text(f"V = 'new {i}'\n" * 50, encoding="utf-8", newline="")
     _git(origin, "commit", "-qam", "B")
     root = tmp_path / "install"
-    _git(tmp_path, "clone", "-q", str(origin), str(root))
+    # Exercise Git's transport path rather than a local hardlink clone; this
+    # fixture rewrites the origin while recovery processes are active.
+    _git(tmp_path, "clone", "--no-local", "-q", str(origin), str(root))
     _git(root, "reset", "-q", "--hard", "HEAD~1")
     pre, target = _git(root, "rev-parse", "HEAD"), _git(root, "rev-parse", "origin/main")
     for i, name in enumerate(names[:150]):  # git got halfway
@@ -589,7 +591,8 @@ def test_an_empty_head_answer_keeps_the_marker(tmp_path, monkeypatch, capsys):
     root, pre, target = _broken_release(tmp_path, 5)
     marker = _rollback_marker(root, pre, target)
     stub = tmp_path / "silent-git"
-    stub.write_text("", encoding="utf-8")
+    stub.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    stub.chmod(0o755)
     monkeypatch.setattr(er, "_git_executable", lambda recorded="": str(stub))
     real_run = subprocess.run
 

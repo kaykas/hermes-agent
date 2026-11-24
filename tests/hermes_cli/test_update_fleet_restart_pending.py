@@ -100,6 +100,13 @@ def _patch_update_deps(monkeypatch, tmp_path, run_side_effect):
                         lambda argv, *, inherit_lock=False, **kw: run_side_effect(list(argv), **kw))
     monkeypatch.setattr(hermes_main, "PROJECT_ROOT", tmp_path)
     monkeypatch.setattr(update_cmd, "_prepare_updated_checkout", lambda *a, **k: None)
+    monkeypatch.setattr(update_cmd, "_prepare_git_command", lambda **_: (False, ["git"], False))
+    monkeypatch.setattr('hermes_cli.update_cmd_posix_pause._discover_systemd', list)
+    monkeypatch.setattr('hermes_cli.update_cmd_posix_pause._discover_launchd', list)
+    monkeypatch.setattr('hermes_cli.update_cmd_posix_pause._discover_bare', lambda _pids: ([], []))
+    from hermes_cli import update_custody
+    monkeypatch.setattr(update_custody, '_run_owner_watched',
+                        lambda argv, kwargs, watch_owner=True: run_side_effect(list(argv), **kwargs))
     (tmp_path / ".git").mkdir()
     monkeypatch.setattr(hermes_main, "_resolve_update_branch", lambda args: "main")
     monkeypatch.setattr(hermes_main, "_is_windows", lambda: False)

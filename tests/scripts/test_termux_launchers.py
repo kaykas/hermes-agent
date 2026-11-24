@@ -17,7 +17,7 @@ from scripts.build.launchers import write_launchers
 def test_launchers_forward_arguments_and_export_payload_environment(tmp_path):
     payload = tmp_path / "payload with spaces"
     (payload / "venv/bin").mkdir(parents=True)
-    (payload / "venv/bin/python").symlink_to(sys.executable)
+    (payload / "venv/bin/python").symlink_to(Path(getattr(sys, "_base_executable", sys.executable)).resolve())
     (payload / "app").mkdir()
     (payload / "app/capture_entry.py").write_text(
         "import json, os, sys\n"
@@ -43,7 +43,9 @@ def test_launchers_forward_arguments_and_export_payload_environment(tmp_path):
         data = json.loads(result.stdout)
         assert data["argv"] == ["one two", "$(not-executed)", ""]
         env = data["env"]
-        assert Path(env["HERMES_PYTHON"]).resolve() == Path(sys.executable).resolve()
+        assert Path(env["HERMES_PYTHON"]).resolve() == Path(
+            getattr(sys, "_base_executable", sys.executable)
+        ).resolve()
         assert Path(env["HERMES_NODE"]) == payload / "tools/node/data/data/com.termux/files/usr/bin/node"
         assert Path(env["HERMES_RUNTIME_DIR"]) == payload / "tools"
         assert env["PYTHONPATH"].split(os.pathsep)[0] == str(payload / "app")
