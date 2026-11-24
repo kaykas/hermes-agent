@@ -111,6 +111,31 @@ class TestBusySessionAck:
 
 
     @pytest.mark.asyncio
+    async def test_redirect_ack_respects_steer_ack_noise_setting(self, monkeypatch):
+        """A successful mid-run redirect stays silent when busy steer acks are off."""
+        monkeypatch.setenv("HERMES_GATEWAY_BUSY_STEER_ACK_ENABLED", "false")
+        runner, _sentinel = _make_runner()
+        event = _make_event(text="redirect the current task")
+        sk = build_session_key(event.source)
+        adapter = _make_adapter()
+        agent = MagicMock()
+        outcome = runner._BusySteerOutcome(
+            effective_mode="interrupt",
+            demoted_for_subagents=False,
+            demoted_for_compression=False,
+            steered=False,
+            redirected=True,
+        )
+
+        await runner._busy_interrupt_and_ack(
+            event, sk, adapter, runner._session_state(sk), agent, outcome
+        )
+
+        adapter._send_with_retry.assert_not_awaited()
+        agent.interrupt.assert_not_called()
+
+
+    @pytest.mark.asyncio
     async def test_telegram_grace_followups_respect_queue_fifo(self, monkeypatch):
         """Rapid Telegram text follow-ups in queue mode must not merge."""
         from gateway.run import GatewayRunner
