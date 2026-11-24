@@ -165,13 +165,23 @@ def pnpm_project(monkeypatch):
         # The real executable: a native binary that needs no node to refresh a lockfile.
         pnpm_entry = runtime / 'pnpm-fixture'
         pnpm_binary = pnpm.binary(pnpm_entry, target)
+        assert pnpm_binary is not None
         pnpm_binary.parent.mkdir(parents=True)
-        # A developer run finds PM's own pnpm under the real Hermes home, which a test may not read
-        # (copy) or resolve (symlink): on POSIX the fixture execs it, so only the child touches it.
+        # A developer run can find either PM's native executable or a Node launcher (Homebrew uses
+        # the latter). Inspect the launcher only in the child: resolving or reading a tool under the
+        # real Hermes home in this process would trip the test suite's real-home I/O guard.
         if os.name == 'nt':
             shutil.copy2(pnpm_tool.resolve(), pnpm_binary)
         else:
-            pnpm_binary.write_text(f'#!/bin/sh\nexec {shlex.quote(str(pnpm_tool))} "$@"\n', encoding='utf-8')
+            node_tool = shutil.which('node') or 'node'
+            tool = shlex.quote(str(pnpm_tool))
+            pnpm_binary.write_text(
+                f'#!/bin/sh\n'
+                f'IFS= read -r shebang < {tool}\n'
+                f'if [ "$shebang" = "#!/usr/bin/env node" ]; then\n'
+                f'    exec {shlex.quote(node_tool)} {tool} "$@"\n'
+                f'fi\n'
+                f'exec {tool} "$@"\n', encoding='utf-8')
             pnpm_binary.chmod(0o755)
         lock.set_pin('pnpm', 'fixture', {target: {'url': 'https://example.invalid/pnpm', 'sha256': '2' * 64}})
         facts.record('pnpm', 'fixture', str(pnpm_entry), pnpm.env(pnpm_entry, target), runtime,
