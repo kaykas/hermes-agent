@@ -9,8 +9,9 @@ class _Ctx:
         self.providers.append(provider)
 
 
-def test_multiplex_profile_skips_root_owned_nous_registration(monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", "/Users/jkw/.hermes/profiles/nova2")
+def test_multiplex_profile_skips_root_owned_nous_registration(monkeypatch, tmp_path):
+    root = tmp_path / "custom-root"
+    monkeypatch.setenv("HERMES_HOME", str(root / "profiles" / "nova2"))
     monkeypatch.setenv("HERMES_DASHBOARD_OAUTH_CLIENT_ID", "agent:nova2")
     ctx = _Ctx()
     nous_plugin.register(ctx)
@@ -18,8 +19,9 @@ def test_multiplex_profile_skips_root_owned_nous_registration(monkeypatch):
     assert "root-only" in nous_plugin.LAST_SKIP_REASON
 
 
-def test_root_home_retains_single_nous_registration(monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", "/Users/jkw/.hermes")
+def test_root_home_retains_single_nous_registration(monkeypatch, tmp_path):
+    # A custom/isolated launch root is not the production ~/.hermes literal.
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "isolated-root"))
     monkeypatch.setenv("HERMES_DASHBOARD_OAUTH_CLIENT_ID", "agent:root-test")
     ctx = _Ctx()
     nous_plugin.register(ctx)
