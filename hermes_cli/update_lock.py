@@ -549,7 +549,8 @@ def _runtime_host_below(holder_pid: int) -> bool:
 
     Such a host is relaunched BY an update and outlives its stages; a ``hermes update`` its agent
     or ``/update`` starts is an independent update that must not run under the first one's claim
-    (cli §7 V9). Unreadable command lines count as not-a-host (the legacy adoption stands).
+    (cli §7 V9). Unreadable command lines are classified as empty argv: the canonical matcher
+    treats those as not-a-host, so the legacy adoption stands without bypassing the classifier.
     """
     try:
         import psutil
@@ -560,9 +561,12 @@ def _runtime_host_below(holder_pid: int) -> bool:
         for _ in range(_MAX_ANCESTRY_DEPTH):
             if proc is None or proc.pid == holder_pid:
                 return False
-            with suppress(psutil.Error):
-                if _is_runtime_host(proc.cmdline()):
-                    return True
+            try:
+                cmdline = proc.cmdline()
+            except psutil.Error:
+                cmdline = []
+            if _is_runtime_host(cmdline):
+                return True
             proc = proc.parent()
     except psutil.Error:
         return False
