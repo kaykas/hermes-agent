@@ -681,6 +681,7 @@ def test_postremoval_unreadable_entry_is_not_counted_as_removed(tmp_path: Path) 
 
 @pytest.mark.platforms("posix")
 @pytest.mark.live_system_guard_bypass  # a red run must kill the orphan this test made (reparented to init)
+@pytest.mark.real_process_discovery  # the orphan is deliberately outside the test's ancestry by reap time
 def test_prune_keeps_entry_a_registered_hermes_process_works_in_but_reaps_orphans(tmp_path, monkeypatch):
     """#132401 live-worker guard: a background process Hermes itself started (tracked in the
     process registry's ``processes.json``) is never reaped, and the idle entry it works in is

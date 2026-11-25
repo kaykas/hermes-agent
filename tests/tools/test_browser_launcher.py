@@ -75,6 +75,16 @@ def _argv(browser) -> list[str]:
     return json.loads(Path(browser.user_data_dir, "argv.json").read_text())
 
 
+@pytest.mark.platforms("macos")
+def test_unrelated_process_cmdline_cannot_leak_profile_paths():
+    """The autouse process fixture also fences argv, not just cwd/environ/open files."""
+    import psutil
+
+    with pytest.raises(psutil.AccessDenied):
+        psutil.Process(os.getppid()).cmdline()
+    assert psutil.Process(os.getpid()).cmdline()
+
+
 @pytest.mark.platforms("posix")
 @pytest.mark.live_system_guard_bypass  # the fake browser's reparented helper is ours to stop
 def test_launch_reads_devtools_port_and_runs_headless_on_an_ephemeral_home_profile(fake_chromium):
