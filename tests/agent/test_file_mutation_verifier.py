@@ -324,19 +324,17 @@ class TestVerifierEnabled:
             json.dumps({"error": "Refusing to overwrite"}),
             is_error=True,
         )
-        assert getattr(agent, "_turn_failed_file_mutations") == {}
+        assert agent._turn_failed_file_mutations == {}
 
     def test_messaging_platforms_suppress_footer(self):
         import logging
         from agent.turn_finalizer import _append_file_mutation_footer
 
         agent = _bare_agent()
-        setattr(agent, "platform", "slack")
-        setattr(
-            agent,
-            "_turn_failed_file_mutations",
-            {"/tmp/a.md": {"tool": "patch", "error_preview": "Could not find old_string"}},
-        )
+        agent.platform = "slack"
+        agent._turn_failed_file_mutations = {
+            "/tmp/a.md": {"tool": "patch", "error_preview": "Could not find old_string"},
+        }
         out = _append_file_mutation_footer(agent, "Clean answer.", logging.getLogger(__name__))
         assert out == "Clean answer."
 
