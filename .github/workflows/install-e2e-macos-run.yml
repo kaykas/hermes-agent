@@ -66,7 +66,7 @@ on:
         type: string
         default: ''
       bundle-arch:
-        description: 'Architecture of the bundled pair. Only arm64 (blacksmith-12vcpu-macos-15) runs: there is no Intel macOS leg.'
+        description: 'Architecture of the bundled pair. Only arm64 (macos-15) runs: there is no Intel macOS leg.'
         required: false
         type: string
         default: arm64
@@ -112,7 +112,7 @@ jobs:
     if: >-
       inputs.install-method == 'desktop-installer@latest' && inputs.tag-has-desktop
       && contains(fromJSON('["open-app-update", "hermes-desktop-app-update", "hermes-update", "installer-script", "installer-script+desktop"]'), inputs.update-method)
-    runs-on: blacksmith-12vcpu-macos-latest
+    runs-on: macos-latest
     timeout-minutes: ${{ inputs.timeout-minutes }}
 
     steps:
@@ -226,7 +226,7 @@ jobs:
     name: packaged bundle (open-app-update)
     if: inputs.install-method == 'packaged-app' && inputs.update-method == 'open-app-update'
     # Not macos-15: v0.22.0 gives Squirrel.Mac 120 s to unpack and verify an update, and macos-15 takes 112-149 s.
-    runs-on: blacksmith-12vcpu-macos-15
+    runs-on: macos-15
     timeout-minutes: ${{ inputs.timeout-minutes }}
 
     steps:
