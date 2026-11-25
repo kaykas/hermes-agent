@@ -204,11 +204,14 @@ def test_a_checkout_venv_built_on_an_external_python_is_not_a_pre_pm_install(ins
     source, _uv, env = installable_project
     external = tmp_path / "system-python" / "bin"
     external.mkdir(parents=True)
-    (external / "python3").symlink_to(Path(sys.executable).resolve())
+    (external / "python3").symlink_to(
+        Path(getattr(sys, "_base_executable", sys.executable)).resolve()
+    )
     executable = build_environment(explicit=True, source=source, python=external / "python3",
                                    out=source / ".venv", cache=tmp_path / "cache", env=env, offline=True)
     venv = executable.parent.parent
-    assert f"home = {external}" in (venv / "pyvenv.cfg").read_text(encoding="utf-8")
+    home = (external / "python3").resolve().parent
+    assert f"home = {home}" in (venv / "pyvenv.cfg").read_text(encoding="utf-8")
     # Hermes installed into it, as a contributor's checkout `.venv` holds it.
     (site_packages(venv) / "hermes_agent-0.0.0.dist-info").mkdir()
 
@@ -656,7 +659,7 @@ def test_explicit_environment_installs_locked_members_without_live_selection(loc
          "print(json.dumps([sys.base_prefix, member_dep.__version__, "
          "importlib.util.find_spec('other_dep') is None]))"], cwd=tmp_path, env=env,
     ))
-    assert result == [sys.base_prefix, "1.0", True]
+    assert result == [str(Path(sys.base_prefix).resolve()), "1.0", True]
     assert (source / "uv.lock").read_bytes() == before_lock
     assert not (source / ".venv").exists()
     assert not (Path(env["HERMES_HOME"])).exists()

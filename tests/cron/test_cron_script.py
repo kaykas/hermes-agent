@@ -346,7 +346,9 @@ class TestRunJobScript:
 
         venv = tmp_path / "selected-venv"
         (venv / "bin").mkdir(parents=True)
-        (venv / "bin" / "python").symlink_to(sys.executable)
+        (venv / "bin" / "python").symlink_to(
+            Path(getattr(sys, "_base_executable", sys.executable)).resolve()
+        )
         (venv / "pyvenv.cfg").write_text(
             f"home = {Path(sys.base_prefix) / 'bin'}\ninclude-system-site-packages = false\n",
             encoding="utf-8",

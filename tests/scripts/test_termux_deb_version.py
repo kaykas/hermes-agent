@@ -106,7 +106,9 @@ def _build_deb(tmp_path, tag, *, release_commit):
     for tool in ("docker", "dpkg-deb", "jq"):
         (bin_dir / tool).write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
         (bin_dir / tool).chmod(0o755)
-    (bin_dir / "python3").symlink_to(sys.executable)
+    (bin_dir / "python3").symlink_to(
+        Path(getattr(sys, "_base_executable", sys.executable)).resolve()
+    )
     git = ["git", "-C", str(repo), "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test"]
     subprocess.run(["git", "init", "-q", str(repo)], check=True)
     subprocess.run([*git, "commit", "-q", "--allow-empty", "-m", "release"], check=True)
