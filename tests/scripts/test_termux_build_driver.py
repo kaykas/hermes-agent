@@ -167,7 +167,9 @@ def test_release_workflow_runs_the_shared_sequence(build_fixture, job_name, iden
     (repo / "termux-build").mkdir()
     (repo / "termux-build/payload").symlink_to(payload, target_is_directory=True)
     tools = log.parent / "tools"
-    (tools / "python3").symlink_to(sys.executable)
+    (tools / "python3").symlink_to(
+        Path(getattr(sys, "_base_executable", sys.executable)).resolve()
+    )
     env.update(HERMES_BUILD_COMMIT=identity[1] if identity[0] == "--commit" else "",
                HERMES_PAYLOAD_TAG=identity[1] if identity[0] == "--tag" else "")
     workflow = YAML(typ="safe").load((ROOT / ".github/workflows/desktop-bundled-release.yml").read_text())
@@ -201,7 +203,9 @@ def test_builder_image_identity_covers_all_inputs(tmp_path, changed_input):
     shutil.copytree(ROOT / "pm", repo / "pm", ignore=shutil.ignore_patterns("__pycache__"))
     tools = tmp_path / "tools"
     tools.mkdir()
-    (tools / "python3").symlink_to(sys.executable)
+    (tools / "python3").symlink_to(
+        Path(getattr(sys, "_base_executable", sys.executable)).resolve()
+    )
     # Only inspect an already-published image; any build/push call is a failure.
     command = 'docker() { [[ "$1 $2" == "manifest inspect" ]]; }; export -f docker; bash "$1"'
     env = {**os.environ, "PATH": f"{tools}{os.pathsep}{os.environ['PATH']}",
@@ -243,7 +247,9 @@ def test_builder_image_no_push_falls_back_to_digest_pinned_base_image(tmp_path, 
     shutil.copytree(ROOT / "pm", repo / "pm", ignore=shutil.ignore_patterns("__pycache__"))
     tools = tmp_path / "tools"
     tools.mkdir()
-    (tools / "python3").symlink_to(sys.executable)
+    (tools / "python3").symlink_to(
+        Path(getattr(sys, "_base_executable", sys.executable)).resolve()
+    )
     docker_log = tmp_path / "docker.log"
     docker_stub = tools / "docker"
     docker_stub.write_text(

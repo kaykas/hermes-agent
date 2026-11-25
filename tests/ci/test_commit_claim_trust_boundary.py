@@ -495,7 +495,9 @@ def test_build_termux_deb_action_never_saves_caches_or_pushes_ghcr_in_commit_mod
 
     tools = tmp_path / "tools"
     tools.mkdir()
-    (tools / "python3").symlink_to(sys.executable)
+    (tools / "python3").symlink_to(
+        Path(getattr(sys, "_base_executable", sys.executable)).resolve()
+    )
     uname_stub = tools / "uname"
     uname_stub.write_text("#!/usr/bin/env bash\necho aarch64\n", encoding="utf-8")
     uname_stub.chmod(0o755)
