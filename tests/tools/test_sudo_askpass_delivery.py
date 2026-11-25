@@ -157,7 +157,7 @@ def test_fallback_when_capability_probe_fails(configured_password):
     env.execute("sudo id -u", stdin_data="rest\n")
     (wrapped, stdin_data, _timeout), = env.command_runs()
     assert stdin_data == f"{PW}\nrest\n"
-    assert "sudo -S -p '\\'''\\'' id -u" in wrapped  # the wrapper's eval quoting of ''
+    assert "{ sudo -S -p '' id -u\n" in wrapped  # direct execution preserves the empty prompt
     assert "__hermes_sudo" not in wrapped
 
 

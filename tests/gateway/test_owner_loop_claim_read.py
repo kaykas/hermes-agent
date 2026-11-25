@@ -2,21 +2,18 @@
 
 Every turn's drain reads the session's pending admissions before its claim (and re-reads the head
 after an awaited preclaim check). On slow storage that read used to stop the whole owner loop, every
-other session's turn, Stop and socket included. Real SessionAuthority + state.db; reads are slowed
-only for the session under test and only while the drain claims, and the stall is measured as
-loop-tick lag. The claim still takes the head the read validated.
+other session's turn, Stop and socket included. Real SessionAuthority + state.db; only the session
+under test's read is blocked, and an independent ticker must run before that read may finish. The
+claim still takes the head the read validated.
 """
 import asyncio
 import threading
-import time
 from types import SimpleNamespace
 
 import pytest
 
 from tests.fixtures.storage_seed import seed_session
 from tests.gateway.fixtures.storage_handles import close_storage_handles, storage_handle
-
-SLOW_S = 2.0
 
 
 @pytest.mark.asyncio
@@ -31,31 +28,41 @@ async def test_claim_pending_read_keeps_the_owner_loop_ticking(tmp_path, monkeyp
     live = authority.sessions['s'] = LiveSession(SimpleNamespace(platform=None, user_id='u'), 'route')
     row, _ = db.admissions.admit(epoch=authority.epoch, principal_id='u', session_id='s',
                                  request_id='r1', payload={'text': 'x'})
-    real, slow = SQLiteAdmissionRepository.list, threading.Event()
+    real = SQLiteAdmissionRepository.list
+    read_started, release_read = threading.Event(), threading.Event()
 
     def slow_list(*args, **kwargs):
-        if slow.is_set():
-            time.sleep(SLOW_S)  # health: allow HX013 -- the slow storage read IS the stall under test
+        read_started.set()
+        # An event, not a sleep: full-suite CPU scheduling must not decide whether this test passes.
+        assert release_read.wait(30), 'test did not release the blocked admission read'
         return real(*args, **kwargs)
+
     monkeypatch.setattr(SQLiteAdmissionRepository, 'list', slow_list)
-    gaps = []
+    ticked = asyncio.Event()
 
     async def tick():
-        last = time.monotonic()
         while True:
-            await asyncio.sleep(0.02)  # health: allow HX013 -- the ticker's period is the owner-loop stall measurement
-            now = time.monotonic()
-            gaps.append(now - last)
-            last = now
+            await asyncio.sleep(0.01)  # health: allow HX013 -- periodic independent owner-loop work
+            ticked.set()
+
     ticker = asyncio.create_task(tick())
-    await asyncio.sleep(0.05)  # health: allow HX013 -- the ticker runs before the claim starts
-    slow.set()
+    claim = None
+    claimed = first = None
     try:
-        claimed, first = await asyncio.wait_for(authority._claim_next(SessionRef('p', 's'), live), 30)
+        claim = asyncio.create_task(authority._claim_next(SessionRef('p', 's'), live))
+        started = await asyncio.wait_for(asyncio.to_thread(read_started.wait, 10), 15)
+        assert started, 'the admission read did not start'
+        ticked.clear()
+        # If list() runs on the event loop, no tick can happen until release_read's 30 s timeout;
+        # claim then finishes and the blocked-read assertion below fails. With to_thread(), the
+        # next tick arrives while the worker is still blocked, regardless of machine speed.
+        await asyncio.wait_for(ticked.wait(), 15)
+        assert not claim.done(), 'claim completed while its admission read was still blocked'
     finally:
-        slow.clear()
+        release_read.set()
+        if claim is not None:
+            claimed, first = await asyncio.wait_for(claim, 30)
         ticker.cancel()
         db.close()
-    assert first['admission_id'] == row.admission_id
+    assert first is not None and first['admission_id'] == row.admission_id
     assert claimed and claimed['admission_id'] == row.admission_id and claimed['status'] == 'started'
-    assert max(gaps) < 0.2, f'owner loop stalled {max(gaps):.2f}s behind the claim read'

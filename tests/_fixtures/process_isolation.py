@@ -9,23 +9,28 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
-def _isolate_process_discovery(_hermetic_environment, monkeypatch):
+def _isolate_process_discovery(_hermetic_environment, request, monkeypatch):
     """Deny path inspection of unrelated macOS processes during tests.
 
-    Holder and worktree scans enumerate every process, then dereference open
-    files, working directories, or environments. On a developer host that can
-    resolve paths in the operator's unrelated, live Hermes home. Preserve the
-    process listing itself: only these path-returning methods behave as though
-    the unrelated process were inaccessible. Test-created descendants remain
-    fully visible, and test-installed psutil doubles still replace these wrappers.
+    Holder, worktree, and browser scans enumerate every process, then dereference command
+    lines, open files, working directories, or environments. On a developer host those can
+    resolve paths in the operator's unrelated, live Hermes home. Preserve the process listing
+    itself: only these path-returning methods behave as though the unrelated process were
+    inaccessible. Test-created descendants remain fully visible, and test-installed psutil
+    doubles still replace these wrappers.
+
+    A test that deliberately reparents its own child can opt out with
+    ``@pytest.mark.real_process_discovery``: ancestry alone cannot identify that orphan as
+    fixture-owned once init adopts it.
     """
-    if sys.platform != "darwin":
+    if sys.platform != "darwin" or request.node.get_closest_marker("real_process_discovery"):
         return
 
     import psutil
 
     process_class = psutil.Process
     real_ppid = process_class.ppid
+    real_cmdline = process_class.cmdline
     real_cwd = process_class.cwd
     real_environ = process_class.environ
     real_exe = process_class.exe
@@ -45,6 +50,11 @@ def _isolate_process_discovery(_hermetic_environment, monkeypatch):
             except (psutil.Error, OSError):
                 return False
         return False
+
+    def cmdline(process):
+        if not test_owned(process):
+            raise psutil.AccessDenied(process.pid)
+        return real_cmdline(process)
 
     def cwd(process):
         if not test_owned(process):
@@ -66,6 +76,7 @@ def _isolate_process_discovery(_hermetic_environment, monkeypatch):
             raise psutil.AccessDenied(process.pid)
         return real_exe(process)
 
+    monkeypatch.setattr(process_class, "cmdline", cmdline)
     monkeypatch.setattr(process_class, "cwd", cwd)
     monkeypatch.setattr(process_class, "environ", environ)
     monkeypatch.setattr(process_class, "open_files", open_files)
