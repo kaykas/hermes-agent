@@ -31,6 +31,12 @@ class RangeHandler(BaseHTTPRequestHandler):
     no_range: bool = False           # ignore Range, serve 200 full body
     etags: bool = True
     chunk: int = 1 << 20             # serve piece size
+    # Pause tests hold one range in flight after its first real chunk until
+    # the route has accepted the pause; other ranges report progress meanwhile.
+    # Fixture teardown always releases the gate.
+    pause_gate: threading.Event | None = None
+    pause_gate_claimed: bool = False
+    pause_gate_lock = threading.Lock()
 
     def log_message(self, *args):
         pass
@@ -97,9 +103,18 @@ class RangeHandler(BaseHTTPRequestHandler):
                 if self.abort_after is not None:
                     end = min(end, self.abort_after - start)
                 piece = body[served:end]
+                first_piece = served == 0
                 self.wfile.write(piece)
                 self.wfile.flush()
                 served += len(piece)
+                gate = self.pause_gate
+                if first_piece and gate is not None:
+                    with self.pause_gate_lock:
+                        should_wait = not self.pause_gate_claimed
+                        if should_wait:
+                            type(self).pause_gate_claimed = True
+                    if should_wait:
+                        gate.wait()
             return
         self.send_response(200)
         self.send_header("Content-Length", str(len(payload)))
@@ -117,12 +132,16 @@ def dl_server():
     RangeHandler.no_range = False
     RangeHandler.etags = True
     RangeHandler.chunk = 1 << 20
+    RangeHandler.pause_gate = None
+    RangeHandler.pause_gate_claimed = False
     server = RangeServer(("127.0.0.1", 0), RangeHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
         yield server
     finally:
+        if RangeHandler.pause_gate is not None:
+            RangeHandler.pause_gate.set()
         server.shutdown()
         server.server_close()
 

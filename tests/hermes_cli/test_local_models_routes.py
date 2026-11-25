@@ -10,6 +10,7 @@ import io
 import hashlib
 import json
 import os
+import threading
 import time
 from pathlib import Path
 
@@ -568,6 +569,7 @@ def _serve_plan(monkeypatch, dl_server, tmp_partials, bodies):
 
     RangeHandler.chunk = 128 * 1024
     RangeHandler.slow_per_chunk = 0.2
+    RangeHandler.pause_gate = threading.Event()
     RangeHandler.payloads = {}
     plan = []
     for name, body in bodies.items():
@@ -595,21 +597,38 @@ def _poll_job(client, job_id, deadline_s=15, until=("paused", "done", "error")):
 
 def _pause_when_flowing(client, job_id):
     """Pause once bytes are actually moving, so the pause lands mid-flight
-    (the downloader stops between chunks) rather than before the probe."""
-    deadline = time.time() + 15
-    while time.time() < deadline:
-        status = client.get(f"/api/local-models/jobs/{job_id}").json()
-        if (status.get("done_bytes") or 0) > 0:
-            break
-        time.sleep(0.03)
-    deadline = time.time() + 15
-    while time.time() < deadline:
-        pr = client.post("/api/local-models/download/pause",
-                         json={"job_id": job_id})
-        if pr.status_code == 200 and pr.json().get("paused") is True:
-            return
-        time.sleep(0.03)
-    raise AssertionError("pause never reached the live download handle")
+    (the downloader stops between chunks) rather than before the probe. One
+    range stays open until the pause lands, removing the final-chunk race.
+    """
+    from tests.pm._range_server import RangeHandler
+
+    try:
+        status = None
+        deadline = time.time() + 15
+        while time.time() < deadline:
+            status = client.get(f"/api/local-models/jobs/{job_id}").json()
+            if (status.get("done_bytes") or 0) > 0:
+                break
+            time.sleep(0.03)
+        assert status is not None and (status.get("done_bytes") or 0) > 0, status
+        deadline = time.time() + 15
+        pause_response = None
+        while time.time() < deadline:
+            pr = client.post("/api/local-models/download/pause",
+                             json={"job_id": job_id})
+            pause_response = (pr.status_code, pr.json())
+            if pr.status_code == 200 and pr.json().get("paused") is True:
+                return
+            time.sleep(0.03)
+        final_status = client.get(f"/api/local-models/jobs/{job_id}").json()
+        raise AssertionError(
+            "pause never reached the live download handle: "
+            f"last status={status!r}, pause response={pause_response!r}, "
+            f"final status={final_status!r}"
+        )
+    finally:
+        if RangeHandler.pause_gate is not None:
+            RangeHandler.pause_gate.set()
 
 
 _BIG_BODY = bytes(range(256)) * (8 * 1024 * 1024 // 256)  # 8 MiB, deterministic
