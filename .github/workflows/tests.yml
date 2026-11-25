@@ -44,7 +44,7 @@ jobs:
     # every slice agrees on the split without a planning job.
     name: Run tests (${{ matrix.slice }}/3)
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -146,7 +146,7 @@ jobs:
     # writer processes per test; a 4-vCPU runner serialises them into timeouts.
     if: inputs.e2e
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - name: Checkout code
         uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a  # v1
