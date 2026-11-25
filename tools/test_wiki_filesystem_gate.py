@@ -25,6 +25,7 @@ def run_gate(tool_name: str, path: str) -> dict:
         input=json.dumps(payload),
         capture_output=True,
         text=True,
+        check=False,
     )
 
     # Parse output: empty stdout means allow, JSON means block.
