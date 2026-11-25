@@ -1827,6 +1827,19 @@ def _operator_message_quality_hold(
     return "operator-message-quality hold: " + ",".join(codes)
 
 
+def _operator_message_quality_mode(job: Optional[dict] = None) -> str:
+    """``hold`` blocks delivery on a lint finding; ``warn`` (default) delivers and records it.
+
+    A hold swallowed whole business messages (card-limit alerts, sourced weekly metrics) over
+    one flagged sentence, so the default records findings for the authoring loop instead.
+    Per-job ``operator_message_quality`` overrides ``cron.operator_message_quality``."""
+    value = (job or {}).get("operator_message_quality")
+    if value is None:
+        with contextlib.suppress(Exception):
+            value = ((_sched.load_config() or {}).get("cron") or {}).get("operator_message_quality")
+    return "hold" if str(value or "").strip().lower() == "hold" else "warn"
+
+
 def _deliver_result(
     job: dict, content: str, adapters=None, loop=None, *, for_failure: bool = False
 ) -> Optional[str]:
@@ -1852,10 +1865,15 @@ def _deliver_result(
             content, job=job, evidence=script_evidence,
         )
         if quality_hold:
-            logger.warning("Job '%s': %s", job.get("id", "?"), quality_hold)
-            _record_delivery_verification(job, [])
-            job["last_delivery_error"] = quality_hold
-            return quality_hold
+            job["last_quality_findings"] = quality_hold
+            if _operator_message_quality_mode(job) == "hold":
+                logger.warning("Job '%s': %s", job.get("id", "?"), quality_hold)
+                _record_delivery_verification(job, [])
+                job["last_delivery_error"] = quality_hold
+                return quality_hold
+            logger.warning("Job '%s': delivering despite %s (warn mode)", job.get("id", "?"), quality_hold)
+        else:
+            job.pop("last_quality_findings", None)
 
     # Restart-safe workers have no live gateway adapters: hand the send back through a durable
     # queue so the current or replacement gateway performs it with relay/E2EE parity. The execution
