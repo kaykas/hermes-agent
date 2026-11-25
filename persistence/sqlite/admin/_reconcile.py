@@ -270,8 +270,11 @@ def _apply_additive_schema(path: Path, budget: _Budget | None = None) -> None:
     budget.check()
     with closing(_connect_tracked_db(path, tracking_path=path, timeout=budget.busy_timeout(),
                                      isolation_level=None)) as conn:
-        _reapply_durability_barriers(conn)
+        # The durability PRAGMAs execute SQLite VM opcodes too. Arm the deadline before them so
+        # connection setup cannot consume an unbounded amount of the maintenance-lock window.
         budget.arm(conn)
+        _reapply_durability_barriers(conn)
+        budget.check()
         try:
             # BEGIN participates in the same deadline as the DDL. In particular,
             # an interrupted BEGIN must roll back and use the browse-budget
