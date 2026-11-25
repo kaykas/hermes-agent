@@ -294,6 +294,12 @@ class TelegramStandin(StandinServer):
     def _m_getMyCommands(self, _p: dict[str, Any]) -> list[Any]:
         return []
 
+    def _m_getWebhookInfo(self, _p: dict[str, Any]) -> dict[str, Any]:
+        # The stand-in only serves getUpdates polling, so no webhook is ever set. The required
+        # WebhookInfo fields are present because PTB rejects a payload without them. A pending
+        # count of 0 keeps the adapter's wedged-getUpdates probe from firing.
+        return {"url": "", "has_custom_certificate": False, "pending_update_count": 0}
+
     def _m_getChat(self, p: dict[str, Any]) -> dict[str, Any]:
         return {**self._chat(p["chat_id"]), "accent_color_id": 0, "max_reaction_count": 11}
 

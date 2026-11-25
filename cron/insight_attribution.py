@@ -23,7 +23,6 @@ are read neither as proof nor rewritten/normalized.
 from __future__ import annotations
 
 import datetime as dt
-import fcntl
 import hashlib
 import json
 import logging
@@ -246,6 +245,8 @@ def record_confirmed_delivery(
         }
         lock_path = receipts_path.with_suffix(receipts_path.suffix + ".lock")
         lock_path.parent.mkdir(parents=True, exist_ok=True)
+        import fcntl  # POSIX-only: a lazy import keeps this module importable on Windows
+
         with lock_path.open("a") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
             try:

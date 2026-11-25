@@ -110,7 +110,7 @@ test('channel smoke binds the complete admitted request, not a commit-build iden
       expect(run('identity').status).not.toBe(0)
     }
   } finally { fs.rmSync(temp, { recursive: true, force: true }) }
-}, 15_000)
+}, 60_000) // ~10 node child spawns: a hang guard, sized for a loaded 4-vCPU GitHub-hosted runner
 
 test.skipIf(process.platform === 'win32')('channel admission validates each distinct request once and re-checks every rejection', () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'channel-admit-'))
