@@ -54,7 +54,7 @@ jobs:
     # that can read it.
     permissions:
       contents: write
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     outputs:
       claim-tag: ${{ steps.admit.outputs.claim-tag }}
       claim-object: ${{ steps.admit.outputs.claim-object }}
@@ -346,7 +346,7 @@ jobs:
     name: Pin actual OLD and NEW signed packages (darwin-arm64)
     needs: [admit, candidates-darwin-arm64]
     if: fromJSON(needs.admit.outputs.jobs)['transitions-darwin-arm64']
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     environment: release-signing
     outputs:
       windows: ${{ steps.plan.outputs.windows }}
@@ -382,7 +382,7 @@ jobs:
     name: Pin actual OLD and NEW signed packages (win32)
     needs: [admit, candidates-win32-bundle]
     if: fromJSON(needs.admit.outputs.jobs)['transitions-win32']
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     environment: release-signing
     outputs:
       windows: ${{ steps.plan.outputs.windows }}
@@ -423,7 +423,7 @@ jobs:
     if: always() && fromJSON(needs.admit.outputs.jobs)['candidate-manifest']
     needs: [admit, candidates-darwin-arm64, candidates-win32-arm64,
             candidates-win32-x64, candidates-win32-bundle, candidates-termux]
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     environment: release-signing
     timeout-minutes: 90
     outputs:
@@ -496,7 +496,7 @@ jobs:
     name: Bootstrap installer release identity
     needs: admit
     if: fromJSON(needs.admit.outputs.jobs)['bootstrap-version']
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     steps:
       - uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a  # v1
         with:
@@ -535,7 +535,7 @@ jobs:
             candidate-manifest, transitions-darwin-arm64,
             transitions-win32, windows-packaged, macos-packaged-arm64,
             bootstrap-version]
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     steps:
       - uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a  # v1
         with:
@@ -602,7 +602,7 @@ jobs:
       !cancelled() && fromJSON(needs.admit.outputs.jobs)['publish-canary']
       && needs.candidate-manifest.result == 'success'
       && (needs.admit.outputs.require-green != 'true' || needs.acceptance.result == 'success')
-    runs-on: blacksmith-32vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     environment: release-signing
     timeout-minutes: 120
     permissions:
@@ -677,7 +677,7 @@ jobs:
       !cancelled() && fromJSON(needs.admit.outputs.jobs)['publish-commit']
       && needs.candidate-manifest.result == 'success'
       && (needs.admit.outputs.require-green != 'true' || needs.acceptance.result == 'success')
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     environment: release-signing
     env:
       RELEASE_TAG: ${{ needs.admit.outputs.tag }}
@@ -710,7 +710,7 @@ jobs:
     name: All artifact publication succeeded
     if: always()
     needs: [admit, acceptance, publish-docker, publish-bundles, publish-canary, publish-commit]
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     steps:
       - uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a  # v1
         with:
@@ -733,7 +733,7 @@ jobs:
     # registry config. Not useblacksmith/setup-docker-builder: its no-cache-key fallback marks
     # docker.io `http = true`, Docker Hub 301s the plain-HTTP manifest PUT to HTTPS, Go replays
     # it as a GET, and the commit 404s (v0.22.3 rc.1-rc.4).
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     environment: release-signing
     permissions:
       contents: write
@@ -875,7 +875,7 @@ jobs:
       group: >-
         install-e2e-red-tracker-${{ needs.admit.outputs.policy == 'canary' && 'auto' || github.run_id }}
       cancel-in-progress: false
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       contents: read
