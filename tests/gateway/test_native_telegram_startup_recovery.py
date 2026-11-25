@@ -31,7 +31,8 @@ class BotAPI(BaseHTTPRequestHandler):
         return {'id': 987654321, 'is_bot': True, 'first_name': 'Fixture', 'username': 'recovery_fixture_bot'}
 
     def _get_webhook_info(self, body):
-        return {'url': '', 'pending_update_count': 0}
+        # Bot API always returns the required WebhookInfo fields; PTB rejects a payload without them.
+        return {'url': '', 'has_custom_certificate': False, 'pending_update_count': 0}
 
     def _send_message(self, body):
         self.server.sent.append(body)

@@ -714,8 +714,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--evidence", type=Path, help="optional UTF-8 evidence file")
     args = parser.parse_args(argv)
     try:
-        text = args.text_file.read_text(encoding="utf-8")
-        evidence = args.evidence.read_text(encoding="utf-8") if args.evidence else None
+        text = args.text_file.read_text(encoding="utf-8-sig")
+        evidence = args.evidence.read_text(encoding="utf-8-sig") if args.evidence else None
         findings = lint(text, evidence=evidence)
     except (OSError, UnicodeError, TypeError) as exc:
         payload = {"ok": False, "error": str(exc), "findings": []}

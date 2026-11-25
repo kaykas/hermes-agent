@@ -7,7 +7,7 @@ from pathlib import Path
 import sqlite3
 
 from tools.browser_supervisor import SUPERVISOR_REGISTRY
-from tools.browser_tool_cdp import _get_dialog_policy_config, _resolve_cdp_override
+from tools.browser_session_cdp import get_dialog_policy_config, resolve_cdp_override
 from tools.browser_vault_tool import browser_vault_enter_code, browser_vault_fill
 
 
@@ -24,9 +24,9 @@ def main():
     if not row or row[1] != 'active' or not row[0]:
         print(json.dumps({'success': False, 'error': 'active broker session required'}))
         raise SystemExit(3)
-    policy, timeout_s = _get_dialog_policy_config()
+    policy, timeout_s = get_dialog_policy_config()
     SUPERVISOR_REGISTRY.get_or_start(task_id=args.session,
-        cdp_url=_resolve_cdp_override(f'http://127.0.0.1:{row[0]}'),
+        cdp_url=resolve_cdp_override(f'http://127.0.0.1:{row[0]}'),
         dialog_policy=policy, dialog_timeout_s=timeout_s)
     raw = browser_vault_enter_code(args.handle, task_id=args.session) if args.code else browser_vault_fill(args.handle, task_id=args.session)
     print(raw)
