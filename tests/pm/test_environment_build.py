@@ -210,8 +210,10 @@ def test_a_checkout_venv_built_on_an_external_python_is_not_a_pre_pm_install(ins
     executable = build_environment(explicit=True, source=source, python=external / "python3",
                                    out=source / ".venv", cache=tmp_path / "cache", env=env, offline=True)
     venv = executable.parent.parent
-    home = (external / "python3").resolve().parent
-    assert f"home = {home}" in (venv / "pyvenv.cfg").read_text(encoding="utf-8")
+    # uv records the directory it was handed for an unmanaged Python and its own install dir for
+    # a uv-managed one; either way ``home`` holds the external interpreter.
+    cfg = dict(line.split(" = ", 1) for line in (venv / "pyvenv.cfg").read_text(encoding="utf-8").splitlines())
+    assert (Path(cfg["home"]) / "python3").resolve() == (external / "python3").resolve()
     # Hermes installed into it, as a contributor's checkout `.venv` holds it.
     (site_packages(venv) / "hermes_agent-0.0.0.dist-info").mkdir()
 
